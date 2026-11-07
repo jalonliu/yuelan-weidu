@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LIB_ROOT = os.environ.get("QMU_LIB_ROOT", r"F:\Users\Calibre 书库")
@@ -212,6 +213,75 @@ def save_meta(data):
 
 
 OPENED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "opened.json")
+
+# ---- 播客订阅（RSS 收听栏目）----
+PODCASTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "podcasts.json")
+DEFAULT_PODCASTS = [
+    {"title": "半拿铁 | 商业沉浮录", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/62382c1103bea1ebfffa1c00"},
+    {"title": "知行小酒馆", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/6013f9f58e2f7ee375cf4216"},
+    {"title": "商业就是这样", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/6022a180ef5fdaddc30bb101"},
+    {"title": "纵横四海", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/62694abdb221dd5908417d1e"},
+    {"title": "硅谷101", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/5e5c52c9418a84a04625e6cc"},
+    {"title": "天真不天真", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/65cef9e3cace72dff8d98de3"},
+    {"title": "岩中花述", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/625635587bfca4e73e990703"},
+    {"title": "声动早咖啡", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/60de7c003dd577b40d5a40f3"},
+    {"title": "疯投圈", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/5e280faf418a84a0461fbd39"},
+    {"title": "罗永浩的十字路口", "url": "https://rsshub.bestblogs.dev/xiaoyuzhou/podcast/68981df29e7bcd326eb91d88"},
+]
+
+
+def podcasts_load():
+    try:
+        return json.load(open(PODCASTS_FILE, encoding="utf-8"))
+    except Exception:
+        return list(DEFAULT_PODCASTS)
+
+
+def podcasts_save(subs):
+    with LOCK:
+        json.dump(subs, open(PODCASTS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+
+
+FEED_CACHE = {}  # rss_url -> (ts, parsed)
+
+
+def podcast_feed(rss_url, max_items=50):
+    """拉取并解析播客 RSS（RSS2.0/iTunes），返回 {title, cover, episodes[]}"""
+    import email.utils as eut
+    cached = FEED_CACHE.get(rss_url)
+    if cached and time.time() - cached[0] < 1800:
+        return cached[1]
+    raw = _http_get(rss_url, timeout=25)
+    root = ET.fromstring(raw)
+    ch = root.find("channel") or root
+    title = (ch.findtext("title") or "").strip()
+    cover = ""
+    it_img = ch.find("image")
+    if it_img is not None:
+        cover = (it_img.findtext("url") or "").strip()
+    eps = []
+    for item in ch.findall("item")[:max_items]:
+        enc = item.find("enclosure")
+        audio = (enc.get("url") or "").strip() if enc is not None else ""
+        if not audio:
+            continue
+        date = (item.findtext("pubDate") or "").strip()
+        try:
+            tt = eut.parsedate_tz(date)
+            if tt:
+                date = time.strftime("%Y-%m-%d", time.gmtime(eut.mktime_tz(tt)))
+        except Exception:
+            pass
+        dur = (item.findtext("{http://www.itunes.com/dtds/podcast-1.0.dtd}duration") or "").strip()
+        eps.append({
+            "title": (item.findtext("title") or "").strip(),
+            "date": date,
+            "dur": dur,
+            "audio": audio,
+        })
+    out = {"title": title, "cover": cover, "episodes": eps}
+    FEED_CACHE[rss_url] = (time.time(), out)
+    return out
 
 
 def opened_load():
@@ -654,6 +724,46 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "count": len(books)})
         elif path == "/api/health":
             self._send(200, b'{"ok":true}')
+        elif path == "/api/podcasts":
+            subs = podcasts_load()
+            self._json(200, {"ok": True, "podcasts": subs})
+        elif path == "/api/podcast/feed":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            url = (qs.get("url") or [""])[0]
+            if not url:
+                self._json(400, {"ok": False, "error": "missing url"})
+                return
+            try:
+                self._json(200, {"ok": True, **podcast_feed(url)})
+            except Exception as e:
+                self._json(502, {"ok": False, "error": str(e)})
+        elif path == "/api/podcast/audio":
+            # 音频代理：透传 Range 以支持拖动进度
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            url = (qs.get("url") or [""])[0]
+            if not url.startswith(("http://", "https://")):
+                self._json(400, {"ok": False, "error": "bad url"})
+                return
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA, **({"Range": self.headers.get("Range")} if self.headers.get("Range") else {})})
+                op = urllib.request.build_opener(urllib.request.ProxyHandler(PROXY))
+                resp = op.open(req, timeout=30)
+                self.send_response(resp.status)
+                self.send_header("Content-Type", resp.headers.get("Content-Type", "audio/mpeg"))
+                for h in ("Content-Length", "Content-Range", "Accept-Ranges"):
+                    if resp.headers.get(h):
+                        self.send_header(h, resp.headers[h])
+                self.end_headers()
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except Exception as e:
+                try:
+                    self._json(502, {"ok": False, "error": str(e)})
+                except Exception:
+                    pass
         elif path.startswith("/api/covers/search/"):
             self._cover_search(path.rsplit("/", 1)[1])
         elif path == "/api/manage/trash":
@@ -740,6 +850,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = unquote_path(self.path)
+        if path == "/api/podcasts":
+            # 添加订阅 {url, title?}（title 缺省时从 feed 取）
+            body = self._read_body()
+            url = (body.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                self._json(400, {"ok": False, "error": "bad url"})
+                return
+            subs = podcasts_load()
+            if any(p["url"] == url for p in subs):
+                self._json(200, {"ok": True, "podcasts": subs, "duplicate": True})
+                return
+            title = (body.get("title") or "").strip()
+            if not title:
+                try:
+                    title = podcast_feed(url, max_items=5).get("title") or url
+                except Exception as e:
+                    self._json(502, {"ok": False, "error": "feed 拉取失败: " + str(e)})
+                    return
+            subs.append({"title": title, "url": url})
+            podcasts_save(subs)
+            self._json(200, {"ok": True, "podcasts": subs})
+            return
+        if path == "/api/podcasts/delete":
+            body = self._read_body()
+            url = (body.get("url") or "").strip()
+            subs = [p for p in podcasts_load() if p["url"] != url]
+            podcasts_save(subs)
+            self._json(200, {"ok": True, "podcasts": subs})
+            return
         if path == "/api/rescan":
             # 前端「重新扫描书库」走 POST；此前只在 do_GET 实现，POST 一直 404
             # 导致「显示扫描了但加不上书」。

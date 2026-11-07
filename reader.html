@@ -995,23 +995,67 @@ window.renderReviewNav = function(delta) {
 async function loadListen() {
   const c = $('#lsContent'); $('#lsBody').style.display = '';
   try {
-    const r = await fetch('/api/books?shelf=main'); const d = await r.json();
-    const list = (d.books || d).slice(0, 15);
+    const r = await fetch('/api/podcasts'); const d = await r.json();
     $('#lsBody').style.display = 'none';
+    const subs = d.podcasts || [];
     c.innerHTML = `
-      <div class="card"><h4>🎧 朗读本地书</h4>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">点「▶ 听」打开书并自动用系统 TTS 逐章朗读；阅读器顶栏可 ⏸ / ⏹ 控制。听书时长自动计入今日阅读时长。</div>
-        ${list.map(b => `<div class="lsbk"><span style="flex:1">${esc(b.title)}</span><button class="mini" data-lsid="${b.id}">▶ 听</button></div>`).join('')}
+      <div class="card"><h4>🎙 播客收听</h4>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px;">点节目看单集列表，点单集直接在本页收听（RSS 订阅源）。本地书听书请到书库打开书后点阅读页「▶ 朗读」。</div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
+          <input id="podUrl" placeholder="粘贴播客 RSS 地址（小宇宙节目页有 RSS Feed）" style="flex:1;min-width:0;">
+          <button class="mini" id="podAdd">＋ 订阅</button>
+        </div>
+        <div id="podList">${subs.map((p, i) => `
+          <div class="lsbk" data-pod="${i}"><span style="flex:1">🎧 ${esc(p.title)}</span>
+            <button class="mini" data-podep="${i}">单集</button>
+            <button class="mini" data-podd-del="${i}" title="退订">✕</button></div>`).join('')}</div>
       </div>
-      <div class="card"><h4>🎙 播客入口</h4>
-        <div class="pods">
-          <a class="pod" href="https://weread.qq.com/" target="_blank"><b>📕 微信读书 · 听一听</b><span>微信读书有声书 / AI 朗读（微信内「听一听」体验完整）</span></a>
-          <a class="pod" href="https://www.xiaoyuzhoufm.com/" target="_blank"><b>🪐 小宇宙播客</b><span>打开小宇宙网页版收听播客节目</span></a>
-          <a class="pod" href="https://weread.qq.com/web/shelf/sync" target="_blank"><b>🎧 微信读书 · 网页朗读</b><span>打开微信读书网页书架，在书内点「听」用官方 AI 朗读</span></a>
-        </div></div>`;
-    c.querySelectorAll('[data-lsid]').forEach(btn => btn.onclick = () => listenBook(+btn.dataset.lsid));
+      <div class="card" id="podEps" style="display:none;"><h4 id="podEpsT"></h4><div id="podEpsL"></div></div>
+      <div class="card"><h4>📕 微信读书 · 听一听</h4>
+        <a class="pod" href="https://weread.qq.com/" target="_blank"><span>微信读书有声书 / AI 朗读暂无公开接口，此处保留入口（微信内「听一听」体验完整）</span></a>
+      </div>`;
+    const eps = $('#podEps');
+    c.querySelectorAll('[data-podep]').forEach(btn => btn.onclick = async () => {
+      const p = subs[+btn.dataset.podep];
+      eps.style.display = ''; $('#podEpsT').textContent = '📻 ' + p.title + ' · 最新 50 期';
+      $('#podEpsL').innerHTML = '<div class="wrmsg">加载单集…</div>';
+      try {
+        const fr = await fetch('/api/podcast/feed?url=' + encodeURIComponent(p.url));
+        const fd = await fr.json();
+        if (!fd.ok) throw new Error(fd.error || '加载失败');
+        $('#podEpsL').innerHTML = fd.episodes.map((e, i) => `
+          <div class="lsbk"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(e.title)}<span style="color:var(--muted);font-size:11px;"> ${esc(e.date || '')}${e.dur ? ' · ' + esc(e.dur) : ''}</span></span>
+          <button class="mini" data-audio="${encodeURIComponent(e.audio)}" data-epi="${i}">▶ 播放</button></div>`).join('') || '<div class="wrmsg">该源暂无音频单集</div>';
+        $('#podEpsL').querySelectorAll('[data-audio]').forEach(b => b.onclick = () => { const e = fd.episodes[+b.dataset.epi]; playPod(p.title, e.title, e.audio); });
+      } catch (e) { $('#podEpsL').innerHTML = '<div class="wrmsg">加载失败：' + esc(String(e.message || e)) + '</div>'; }
+    });
+    c.querySelectorAll('[data-podd-del]').forEach(btn => btn.onclick = async () => {
+      const p = subs[+btn.dataset.poddDel];
+      if (!confirm('退订「' + p.title + '」？')) return;
+      await fetch('/api/podcasts/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: p.url }) });
+      loadListen();
+    });
+    $('#podAdd').onclick = async () => {
+      const url = $('#podUrl').value.trim();
+      if (!url) return alert('请先粘贴 RSS 地址');
+      const ar = await fetch('/api/podcasts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
+      const ad = await ar.json();
+      if (!ad.ok) return alert('订阅失败：' + (ad.error || '?'));
+      loadListen();
+    };
   } catch (e) { $('#lsBody').textContent = '加载失败：' + esc(String(e)); }
 }
+function playPod(show, ep, audio) {
+  let bar = document.getElementById('podBar');
+  if (!bar) {
+    bar = document.createElement('div'); bar.id = 'podBar';
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = `<div style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;">🎙 <b>${esc(show)}</b> · ${esc(ep)}</div>
+    <audio id="podAudio" controls autoplay style="flex:2;min-width:0;height:32px;" src="/api/podcast/audio?url=${encodeURIComponent(audio)}"></audio>`;
+  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:60;display:flex;gap:10px;align-items:center;padding:8px 12px;background:#fff;border-top:1px solid var(--border);box-shadow:0 -2px 8px rgba(0,0,0,.06);';
+}
+window.playPod = playPod;
 async function listenBook(id) {
   let b = books.find(x => x.id === id);
   if (!b) {
