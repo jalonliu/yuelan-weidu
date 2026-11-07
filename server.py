@@ -138,6 +138,35 @@ def _http_get(url, referer=None, timeout=15):
     return op.open(url, timeout=timeout).read()
 
 
+# ---- 播客播放记录（断点续听 + 搜索）----
+LISTEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "listen.json")
+
+
+def listen_history():
+    try:
+        return json.load(open(LISTEN_FILE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def listen_record(audio_key, show, ep, pos, dur):
+    """写入/更新一条播放记录：键=音频 URL，值=进度与元数据。"""
+    with LOCK:
+        h = listen_history()
+        h[audio_key] = {
+            "show": show, "ep": ep, "audio": audio_key,
+            "pos": round(float(pos or 0), 1),
+            "dur": round(float(dur or 0), 1),
+            "updated": int(time.time()),
+        }
+        # 只保留最近 200 条
+        if len(h) > 200:
+            for k, _ in sorted(h.items(), key=lambda kv: kv[1].get("updated", 0))[: len(h) - 200]:
+                h.pop(k)
+        json.dump(h, open(LISTEN_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    return h[audio_key]
+
+
 def clean_title(fn):
     name = os.path.splitext(fn)[0]
     name = NOISE.sub("", name)
@@ -737,6 +766,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/podcasts":
             subs = podcasts_load()
             self._json(200, {"ok": True, "podcasts": subs})
+        elif path == "/api/listen/history":
+            self._json(200, {"ok": True, "history": listen_history()})
         elif path == "/api/podcast/feed":
             qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             url = (qs.get("url") or [""])[0]
@@ -1033,6 +1064,21 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "masked": (cfg["apiKey"][:3] + "****" + cfg["apiKey"][-4:]) if len(cfg["apiKey"]) > 7 else bool(cfg["apiKey"])})
         elif path.startswith("/api/covers/apply/"):
             self._cover_apply(path.rsplit("/", 1)[1])
+        elif path.startswith("/api/covers/upload/"):
+            self._cover_upload(path.rsplit("/", 1)[1])
+        elif path == "/api/listen/progress":
+            body = self._read_body()
+            key = str(body.get("audio") or "")
+            if not key:
+                self._json(400, {"ok": False, "error": "audio required"})
+                return
+            rec = listen_record(key, str(body.get("show") or ""), str(body.get("ep") or ""),
+                                body.get("pos") or 0, body.get("dur") or 0)
+            self._json(200, {"ok": True, "record": rec})
+        elif path == "/api/listen/clear":
+            with LOCK:
+                json.dump({}, open(LISTEN_FILE, "w", encoding="utf-8"))
+            self._json(200, {"ok": True})
         elif path.startswith("/api/manage/delete/"):
             self._delete_book(path.rsplit("/", 1)[1])
         elif path.startswith("/api/manage/restore/"):
@@ -1094,6 +1140,36 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "cover": dest, "bytes": len(img)})
         except Exception as e:
             self._json(500, {"ok": False, "error": str(e)})
+
+    def _cover_upload(self, bid):
+        """手动上传本地图片作为封面（multipart 或裸图片字节均可）。"""
+        data = get_meta()
+        book = next((b for b in data["books"] if str(b["id"]) == bid), None)
+        if not book:
+            self._json(404, {"ok": False, "error": "book not found"})
+            return
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n) if n else b""
+        # 若是 multipart 表单，截取第一个文件部分的字节
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" in ctype and raw.startswith(b"--"):
+            import re as _re
+            m = _re.search(rb"\\r\\n\\r\\n(.*?)\\r\\n--", raw, _re.S)
+            if not m:
+                self._json(400, {"ok": False, "error": "multipart 解析失败"})
+                return
+            raw = m.group(1)
+        if len(raw) < 500:
+            self._json(400, {"ok": False, "error": "图片内容过小或为空"})
+            return
+        full = os.path.join(LIB_ROOT, book["path"])
+        dest = os.path.join(os.path.dirname(full), "cover.jpg")
+        with LOCK:
+            open(dest, "wb").write(raw)
+            data["covers"][bid] = dest
+            book["cover"] = True
+            save_meta(data)
+        self._json(200, {"ok": True, "cover": dest, "bytes": len(raw)})
 
     # ---------- 管理 ----------
     def _delete_book(self, bid):

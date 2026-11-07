@@ -363,7 +363,7 @@ function renderGrid(list) {
       <div class="acts">
         ${['main','misc','adult'].filter(s => s !== b.shelf).map(s =>
           `<button class="mv" data-act="shelf:${s}">${{main:'📚', misc:'🧺', adult:'🔞'}[s]}</button>`).join('')}
-        ${b.cover ? '' : `<button class="cvbtn" data-act="cover">🖼 封面</button>`}
+        ${b.cover ? `<button class="cvbtn" data-act="cover">🖼 换封面</button>` : `<button class="cvbtn" data-act="cover">🖼 封面</button>`}
         <button class="del" data-act="del">✕ 删</button>
       </div>`;
     el.onclick = (ev) => {
@@ -844,7 +844,19 @@ async function pickCover(b) {
   $('#coverModal').style.display = 'flex';
   $('#coverTitle').textContent = '选择封面 — ' + b.title;
   $('#coverMsg').textContent = '搜索豆瓣…';
-  $('#cands').innerHTML = '';
+  $('#cands').innerHTML = `<div style="margin-bottom:10px;">
+    <label style="cursor:pointer;display:inline-block;border:1px dashed var(--border);border-radius:8px;padding:8px 14px;font-size:13px;">
+      📁 上传本地图片做封面<input id="coverFile" type="file" accept="image/*" style="display:none">
+    </label></div>`;
+  $('#coverFile').onchange = async (ev) => {
+    const f = ev.target.files[0];
+    if (!f) return;
+    $('#coverMsg').textContent = '上传中…';
+    const rr = await fetch('/api/covers/upload/' + b.id, { method: 'POST', body: f });
+    const dd = await rr.json();
+    if (dd.ok) { $('#coverModal').style.display = 'none'; loadShelf(); }
+    else $('#coverMsg').textContent = '上传失败: ' + dd.error;
+  };
   const r = await fetch('/api/covers/search/' + b.id);
   const d = await r.json();
   $('#coverMsg').textContent = d.ok ? `关键词「${d.query}」→ ${d.candidates.length} 个候选，点击应用` : ('搜索失败: ' + d.error);
@@ -1075,9 +1087,23 @@ async function loadListen() {
             <button class="mini" data-podd-del="${i}" title="退订">✕</button></div>`).join('')}</div>
       </div>
       <div class="card" id="podEps" style="display:none;"><h4 id="podEpsT"></h4><div id="podEpsL"></div></div>
+      <div class="card"><h4>🕘 播放记录（断点续听）</h4>
+        <div style="display:flex;gap:8px;margin-bottom:8px;">
+          <input id="podHisQ" placeholder="搜索播放记录（节目名 / 单集名）" style="flex:1;min-width:0;">
+          <button class="mini" id="podHisClr">清空</button>
+        </div>
+        <div id="podHis"></div>
+      </div>
       <div class="card"><h4>📕 微信读书 · 听一听</h4>
         <a class="pod" href="https://weread.qq.com/" target="_blank"><span>微信读书有声书 / AI 朗读暂无公开接口，此处保留入口（微信内「听一听」体验完整）</span></a>
       </div>`;
+    $('#podHisQ').oninput = (ev) => renderHistory(ev.target.value);
+    $('#podHisClr').onclick = async () => {
+      if (!confirm('清空全部播放记录？（不可恢复）')) return;
+      await fetch('/api/listen/clear', { method: 'POST' });
+      loadHistory();
+    };
+    loadHistory();
     const eps = $('#podEps');
     c.querySelectorAll('[data-podep]').forEach(btn => btn.onclick = async () => {
       const p = subs[+btn.dataset.podep];
@@ -1109,6 +1135,35 @@ async function loadListen() {
     };
   } catch (e) { $('#lsBody').textContent = '加载失败：' + esc(String(e)); }
 }
+function fmtT(s) { s = Math.floor(s || 0); return `${Math.floor(s/3600)}:${String(Math.floor(s%3600/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`; }
+
+async function loadHistory() {
+  const box = $('#podHis');
+  if (!box) return;
+  const r = await fetch('/api/listen/history'); const d = await r.json();
+  const h = d.history || {};
+  const list = Object.values(h).sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  box.__all = list;
+  renderHistory('');
+}
+function renderHistory(q) {
+  const box = $('#podHis'); if (!box) return;
+  const kw = (q || '').trim().toLowerCase();
+  const list = (box.__all || []).filter(x => !kw || (x.show + ' ' + x.ep).toLowerCase().includes(kw));
+  box.innerHTML = (!kw && !list.length) ? '<div class="wrmsg">还没有播放记录，去点一集试试</div>'
+    : list.map(x => {
+      const pct = x.dur ? Math.min(100, Math.round(x.pos / x.dur * 100)) : 0;
+      const done = x.dur && x.pos / x.dur > 0.95;
+      return `<div class="lsbk"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+          ${esc(x.ep)}<span style="color:var(--muted);font-size:11px;"> ${esc(x.show)}${x.dur ? ' · ' + fmtT(x.pos) + '/' + fmtT(x.dur) + ' (' + pct + '%)' : ''}${done ? ' ✅' : ''}</span></span>
+        <button class="mini" data-res="${encodeURIComponent(x.audio)}" data-hs="${esc(x.show)}" data-hei="${esc(x.ep)}">${done ? '↻ 重听' : '▶ 继续'}</button></div>`;
+    }).join('') || '<div class="wrmsg">无匹配记录</div>';
+  box.querySelectorAll('[data-res]').forEach(b => b.onclick = () => playPod(b.dataset.hs, b.dataset.hei, decodeURIComponent(b.dataset.res)));
+}
+async function savePos(show, ep, audio, pos, dur) {
+  try { await fetch('/api/listen/progress', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ show, ep, audio, pos, dur }) }); } catch {}
+}
 function playPod(show, ep, audio) {
   let bar = document.getElementById('podBar');
   if (!bar) {
@@ -1118,6 +1173,25 @@ function playPod(show, ep, audio) {
   bar.innerHTML = `<div style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;">🎙 <b>${esc(show)}</b> · ${esc(ep)}</div>
     <audio id="podAudio" controls autoplay style="flex:2;min-width:0;height:32px;" src="/api/podcast/audio?url=${encodeURIComponent(audio)}"></audio>`;
   bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:60;display:flex;gap:10px;align-items:center;padding:8px 12px;background:#fff;border-top:1px solid var(--border);box-shadow:0 -2px 8px rgba(0,0,0,.06);';
+  const a = bar.querySelector('#podAudio');
+  // 断点续听：canplay 时跳到上次位置
+  a.addEventListener('canplay', async () => {
+    try {
+      const r = await fetch('/api/listen/history'); const d = await r.json();
+      const rec = (d.history || {})[audio];
+      if (rec && rec.pos > 15 && rec.dur && rec.pos / rec.dur < 0.95) {
+        a.currentTime = rec.pos;
+      }
+    } catch {}
+  }, { once: true });
+  // 进度保存：每 5 秒 + 暂停 + 关页
+  let lastSave = 0;
+  const save = () => { savePos(show, ep, audio, a.currentTime, a.duration); lastSave = Date.now(); };
+  a.addEventListener('timeupdate', () => { if (Date.now() - lastSave > 5000) save(); });
+  a.addEventListener('pause', () => save());
+  window.addEventListener('beforeunload', () => save());
+  savePos(show, ep, audio, 0, 0); // 立即入历史
+  setTimeout(loadHistory, 1500);
 }
 window.playPod = playPod;
 async function listenBook(id) {
