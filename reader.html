@@ -13,7 +13,7 @@
   #shelf h1 { font-size:20px; font-weight:600; margin:4px 0 2px; }
   #shelf .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
   #search { width:100%; max-width:420px; padding:8px 14px; border:1px solid var(--border); border-radius:8px; font-size:14px; background:var(--card); outline:none; }
-  #grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:20px; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:14px; margin-top:20px; }
   .bk { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px; cursor:pointer; transition:box-shadow .15s; overflow:hidden; }
   .bk:hover { box-shadow:0 4px 14px rgba(0,0,0,.10); }
   .bk .cv { height:150px; border-radius:6px; background:#e8e6e0; display:flex; align-items:center; justify-content:center; overflow:hidden; margin-bottom:8px; }
@@ -276,13 +276,20 @@ async function loadShelf(shelf) {
   renderGrid(books);
 }
 
-/* ---- 书架分页：默认每页 12 本（3 栏 × 4 行），可切回连续滚动 ---- */
-const PAGE_SIZE = 12;
+/* ---- 书架分页：固定每页 3 行，列数随屏宽自适应（沿用原小卡片风格），可切回连续滚动 ---- */
+const PAGE_ROWS = 3;
 let pageMode = localStorage.getItem('qmu-pagemode') || 'page';
 let curPage = 1;
 let viewList = [];
 
-function totalPages() { return Math.max(1, Math.ceil(viewList.length / PAGE_SIZE)); }
+function pageSize() {
+  // 按 #grid 实际宽度算列数（列宽 120 + 间距 14），页大小 = 列数 × 3 行
+  const g = $('#grid');
+  const cols = Math.max(1, Math.floor((g.clientWidth + 14) / (120 + 14)));
+  return cols * PAGE_ROWS;
+}
+
+function totalPages() { return Math.max(1, Math.ceil(viewList.length / pageSize())); }
 
 function gotoPage(n) {
   curPage = Math.min(Math.max(1, n), totalPages());
@@ -327,8 +334,8 @@ function renderGrid(list) {
   grid.innerHTML = '';
   let rows = list;
   if (pageMode === 'page') {
-    const start = (curPage - 1) * PAGE_SIZE;
-    rows = list.slice(start, start + PAGE_SIZE);
+    const start = (curPage - 1) * pageSize();
+    rows = list.slice(start, start + pageSize());
   }
   for (const b of rows) {
     const el = document.createElement('div');
