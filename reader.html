@@ -34,6 +34,10 @@
   #stage foliate-view { width:100%; max-width:860px; height:100%; margin:0 auto; }
   #stage foliate-view.spread { max-width:1400px; }
   #stage iframe.pdfview { width:100%; height:100%; border:none; background:#fff; }
+  #stage .txtview { position:relative; width:100%; max-width:760px; height:100%; margin:0 auto; overflow-y:auto; padding:32px 36px 80px; box-sizing:border-box; background:var(--card,#fff); color:var(--fg,#333); }
+  #stage .txtview h2 { font-size:17px; margin:28px 0 14px; color:var(--accent,#1a73e8); border-bottom:1px solid var(--border,#eee); padding-bottom:6px; }
+  #stage .txtview h2:first-child { margin-top:0; }
+  #stage .txtview p { font-size:16px; line-height:1.9; margin:0 0 12px; text-indent:2em; }
   #toc { position:fixed; left:0; top:42px; bottom:0; width:280px; background:#fdfcf9; color:#3d3d3a; overflow:auto; padding:12px; font-size:13px; display:none; border-right:1px solid #e8e6e0; z-index:10; }
   #toc a { display:block; padding:5px 8px; border-radius:5px; color:#3d3d3a; text-decoration:none; cursor:pointer; }
   #toc a:hover { background:#f0eee9; }
@@ -1156,6 +1160,101 @@ async function loadListen() {
 }
 function fmtT(s) { s = Math.floor(s || 0); return `${Math.floor(s/3600)}:${String(Math.floor(s%3600/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`; }
 
+// ---------- TXT 在线阅读 ----------
+let txtState = null; // { b, box, chapters: [{title, top}] }
+
+async function openTxt(b) {
+  const stage = $('#stage');
+  let buf;
+  try {
+    const r = await fetch(`/file/${b.id}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    buf = await r.arrayBuffer();
+  } catch (err) { showErr(`TXT 加载失败：${err.message}`); return; }
+  // 编码识别：BOM → utf-8 严格 → gb18030 兜底
+  let text;
+  const head = new Uint8Array(buf.slice(0, 3));
+  const dec = (label) => new TextDecoder(label).decode(buf);
+  if (head[0] === 0xFF && head[1] === 0xFE) text = new TextDecoder('utf-16le').decode(buf);
+  else if (head[0] === 0xFE && head[1] === 0xFF) text = new TextDecoder('utf-16be').decode(buf);
+  else if (head[0] === 0xEF && head[1] === 0xBB && head[2] === 0xBF) text = dec('utf-8');
+  else {
+    try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+    catch { try { text = new TextDecoder('gb18030').decode(buf); } catch { text = dec('utf-8'); } }
+  }
+  text = text.replace(/^\uFEFF/, '');
+  // 章节切分：行首 第X章/节/卷/回 等标题行
+  const lines = text.split(/\r?\n/);
+  const RE = /^[#\s　]*(第[0-9一二三四五六七八九十百千万零两]+[章节卷部回集][^。！？\n]{0,24}|序章|楔子|尾声|后记|番外[^。！？]{0,12})[\s　。]*$/;
+  const chapters = [];
+  const box = document.createElement('div');
+  box.className = 'txtview';
+  const addHead = (title) => {
+    const h = document.createElement('h2');
+    h.textContent = title;
+    box.appendChild(h);
+    chapters.push({ title, el: h });
+  };
+  addHead('卷首');
+  for (const line of lines) {
+    const t2 = line.trim();
+    if (t2 && RE.test(t2)) { addHead(t2); continue; }
+    if (!t2) continue;
+    const p = document.createElement('p');
+    p.textContent = t2;
+    box.appendChild(p);
+  }
+  stage.innerHTML = '';
+  stage.appendChild(box);
+  chapters.forEach(c => { c.top = c.el.offsetTop; }); // 挂载后采样（挂载前 offsetTop 全为 0）
+  txtState = { b, box, chapters };
+  $('#pg').textContent = `${chapters.length} 章 · ${fmtSize(b.size)}`;
+  // 目录
+  const fill = () => {
+    const tb = $('#toc'); tb.innerHTML = '';
+    txtState.chapters.forEach(c => {
+      const a = document.createElement('a');
+      a.textContent = c.title;
+      a.onclick = () => { const el = [...box.querySelectorAll('h2')].find(x => x.textContent === c.title); if (el) el.scrollIntoView(); tb.style.display = 'none'; };
+      tb.appendChild(a);
+    });
+  };
+  fill();
+  // 进度恢复 + 滚动进度上报
+  const key = 'qmu-txtpos-' + b.id;
+  const saved = parseFloat(localStorage.getItem(key));
+  if (saved > 0) box.scrollTop = saved * (box.scrollHeight - box.clientHeight);
+  let last = 0;
+  box.addEventListener('scroll', () => {
+    const max = box.scrollHeight - box.clientHeight;
+    const frac = max > 0 ? box.scrollTop / max : 0;
+    if (b._trackPct == null) b._trackPct = frac;
+    b._trackPct = frac;
+    if (trackMeta) trackMeta.lastProgress = frac;
+    localStorage.setItem(key, frac);
+    const now = Date.now();
+    if (now - last > 800) {
+      last = now;
+      const below = txtState.chapters.filter(c => c.top <= box.scrollTop);
+      const ch = below[below.length - 1];
+      if (ch) $('#pg').textContent = `${ch.title} · ${(frac * 100).toFixed(1)}%`;
+    }
+  });
+  applyTheme();
+  startTracking({ id: b.id, title: b.title, lastProgress: b._trackPct || 0 });
+}
+
+function txtNav(dir) {
+  if (!txtState) return false;
+  const box = txtState.box;
+  box.scrollBy({ top: dir * (box.clientHeight * 0.9), behavior: 'smooth' });
+  return true;
+}
+
+function closeTxt() {
+  txtState = null;
+}
+
 async function uploadCoverBlob(bid, blobOrFile, name) {
   if (!blobOrFile) return;
   $('#coverMsg').textContent = '上传中…';
@@ -1379,6 +1478,8 @@ async function openBook(b) {
     return;
   }
 
+  if (b.format === 'txt') { openTxt(b); return; }
+
   try {
     const resp = await fetch(`/file/${b.id}`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -1436,17 +1537,18 @@ $('#back').onclick = () => {
   ttsStop();
   try { view?.destroy?.(); } catch { /* noop */ }
   view = null;
+  closeTxt();
   $('#reader').style.display = 'none';
   $('#stage').innerHTML = '';
   $('#shelf').style.display = 'block';
 };
-$('#next').onclick = () => view?.next();
-$('#prev').onclick = () => view?.prev();
+$('#next').onclick = () => { if (!txtNav(1)) view?.next(); };
+$('#prev').onclick = () => { if (!txtNav(-1)) view?.prev(); };
 $('#tocbtn').onclick = () => { const t = $('#toc'); t.style.display = t.style.display === 'block' ? 'none' : 'block'; };
 document.addEventListener('keydown', e => {
   if ($('#reader').style.display !== 'flex') return;
-  if (e.key === 'ArrowRight' || e.key === 'PageDown') view?.next();
-  if (e.key === 'ArrowLeft' || e.key === 'PageUp') view?.prev();
+  if (e.key === 'ArrowRight' || e.key === 'PageDown') { if (!txtNav(1)) view?.next(); }
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { if (!txtNav(-1)) view?.prev(); }
   if (e.key === 'Escape') $('#toc').style.display = 'none';
 });
 // 外层（页边距/非 iframe 区域）滚轮翻页
