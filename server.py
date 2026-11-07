@@ -553,23 +553,50 @@ def track_summary():
             "topBooks": top, "bookCount": len(books)}
 
 
-def cover_search(q):
-    """豆瓣 suggest 接口 -> 候选列表"""
-    url = "https://book.douban.com/j/subject_suggest?q=" + urllib.parse.quote(q)
-    try:
-        data = json.loads(_http_get(url, timeout=12).decode("utf-8"))
-    except Exception as e:
-        return {"ok": False, "error": str(e), "candidates": []}
-    cands = []
-    for it in data:
-        if it.get("type") == "b" and it.get("pic"):
-            cands.append({
-                "title": it.get("title", ""),
-                "author": it.get("author_name", ""),
-                "year": it.get("year", ""),
-                "url": it.get("pic", ""),
-            })
-    return {"ok": True, "candidates": cands[:6]}
+def cover_queries(title, author):
+    """豆瓣搜索词清洗：去书名号/括号注记（精校版全本等）/噪声词，超长截断。"""
+    t = re.sub(r"[《》「」〖〗\[\]]", "", title or "")
+    t = re.split(r"[（(【\[]", t)[0]
+    t = re.sub(r"(精校|精排|全本|全集|校对|典藏|扫描|高清|文字|完整|插图|修订|珍藏|双语|注释|注音|软精装|套装|珍藏版?|纪念版?|新版?|原版?|第?\s*\d+\s*版?|上|下|Ⅰ|Ⅱ|Ⅲ).{0,8}$", "", t)
+    t = t.strip(" -_·，,。;；:：!！?？")
+    queries = []
+    if t:
+        queries.append(t)                                  # 先只搜清洗后的书名
+        if len(t) > 14:
+            queries.append(t[:14])                         # 超长教材名截断
+    a = re.split(r"[/，,、]", author or "")[0].strip()
+    if t and a and len(t) <= 12:
+        queries.append(t + " " + a)                        # 书名+作者兜底
+    return queries
+
+
+def cover_search(queries):
+    """豆瓣 suggest 接口 -> 候选列表；逐个查询词回退，返回首个有结果的。"""
+    if isinstance(queries, str):
+        queries = [queries]
+    tried = []
+    for q in queries:
+        if not q:
+            continue
+        tried.append(q)
+        try:
+            data = json.loads(_http_get(
+                "https://book.douban.com/j/subject_suggest?q=" + urllib.parse.quote(q),
+                timeout=12).decode("utf-8"))
+        except Exception as e:
+            return {"ok": False, "error": str(e), "candidates": [], "tried": tried}
+        cands = []
+        for it in data:
+            if it.get("type") == "b" and it.get("pic"):
+                cands.append({
+                    "title": it.get("title", ""),
+                    "author": it.get("author_name", ""),
+                    "year": it.get("year", ""),
+                    "url": it.get("pic", ""),
+                })
+        if cands:
+            return {"ok": True, "candidates": cands[:6], "tried": tried}
+    return {"ok": True, "candidates": [], "tried": tried}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -860,7 +887,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"ok": False, "error": "book not found"})
             return
         q = book["title"] + ((" " + book["author"]) if book["author"] else "")
-        self._json(200, dict(query=q, **cover_search(q)))
+        self._json(200, dict(query=q, **cover_search(cover_queries(book["title"], book["author"]))))
 
     def _cover_apply(self, bid):
         body = self._read_body()

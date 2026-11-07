@@ -820,6 +820,7 @@ $('#coverAllBtn').onclick = async () => {
       });
       (await a.json()).ok ? ok++ : fail++;
     } catch { fail++; }
+    await new Promise(r => setTimeout(r, 300)); // 对豆瓣限速友好
   }
   $('#coverAllBtn').textContent = '🖼 无封面批量匹配';
   alert(`批量匹配完成：成功 ${ok}，失败 ${fail}（失败可单独重试）`);
