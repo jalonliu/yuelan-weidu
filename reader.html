@@ -223,7 +223,7 @@ body.manage .bk { outline:1px dashed var(--border); }
 </div></div>
 
 <div class="modal" id="coverModal"><div class="box">
-  <button class="close" onclick="document.getElementById('coverModal').style.display='none'">✕</button>
+  <button class="close" onclick="closeCoverModal()">✕</button>
   <h3 id="coverTitle">选择封面</h3>
   <div id="coverMsg" style="color:var(--muted);font-size:12px;margin-bottom:10px;"></div>
   <div id="cands"></div>
@@ -844,18 +844,37 @@ async function pickCover(b) {
   $('#coverModal').style.display = 'flex';
   $('#coverTitle').textContent = '选择封面 — ' + b.title;
   $('#coverMsg').textContent = '搜索豆瓣…';
-  $('#cands').innerHTML = `<div style="margin-bottom:10px;">
-    <label style="cursor:pointer;display:inline-block;border:1px dashed var(--border);border-radius:8px;padding:8px 14px;font-size:13px;">
-      📁 上传本地图片做封面<input id="coverFile" type="file" accept="image/*" style="display:none">
-    </label></div>`;
-  $('#coverFile').onchange = async (ev) => {
-    const f = ev.target.files[0];
-    if (!f) return;
-    $('#coverMsg').textContent = '上传中…';
-    const rr = await fetch('/api/covers/upload/' + b.id, { method: 'POST', body: f });
+  $('#cands').innerHTML = `<div style="margin-bottom:10px;display:flex;flex-direction:column;gap:8px;">
+    <div style="display:flex;gap:6px;">
+      <input id="coverUrl" placeholder="粘贴图片链接（右键网页图片→复制图片地址）" style="flex:1;min-width:0;">
+      <button class="mini" id="coverUrlGo">应用</button>
+    </div>
+    <div id="coverDrop" style="border:1px dashed var(--border);border-radius:8px;padding:10px;text-align:center;font-size:13px;color:var(--muted);cursor:pointer;">
+      📁 点此选择本地图片 / 拖拽图片到这里 / 截图后 Ctrl+V 粘贴
+      <input id="coverFile" type="file" accept="image/*" style="display:none">
+    </div>
+  </div>`;
+  $('#coverFile').onchange = (ev) => { const f = ev.target.files[0]; if (f) uploadCoverBlob(b.id, f, f.name); };
+  $('#coverDrop').onclick = () => $('#coverFile').click();
+  // 拖拽
+  const dz = $('#coverDrop');
+  dz.ondragover = (e) => { e.preventDefault(); dz.style.borderColor = 'var(--accent)'; };
+  dz.ondragleave = () => { dz.style.borderColor = 'var(--border)'; };
+  dz.ondrop = (e) => { e.preventDefault(); dz.style.borderColor = 'var(--border)'; const f = e.dataTransfer?.files?.[0]; if (f) uploadCoverBlob(b.id, f, f.name); };
+  // 剪贴板粘贴（弹窗开着时）
+  pickCover._pasteHandler = (e) => {
+    const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+    if (item) { uploadCoverBlob(b.id, item.getAsFile(), 'clipboard.png'); }
+  };
+  document.addEventListener('paste', pickCover._pasteHandler);
+  // 图片链接
+  $('#coverUrlGo').onclick = async () => {
+    const url = $('#coverUrl').value.trim();
+    if (!url) return;
+    $('#coverMsg').textContent = '应用中…';
+    const rr = await fetch('/api/covers/apply/' + b.id, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
     const dd = await rr.json();
-    if (dd.ok) { $('#coverModal').style.display = 'none'; loadShelf(); }
-    else $('#coverMsg').textContent = '上传失败: ' + dd.error;
+    if (dd.ok) closeCoverModal(); else $('#coverMsg').textContent = '应用失败: ' + dd.error;
   };
   const r = await fetch('/api/covers/search/' + b.id);
   const d = await r.json();
@@ -872,7 +891,7 @@ async function pickCover(b) {
         body: JSON.stringify({ url: c.url })
       });
       const dd = await rr.json();
-      if (dd.ok) { $('#coverModal').style.display = 'none'; loadShelf(); }
+      if (dd.ok) closeCoverModal();
       else { el.style.opacity = '1'; alert('应用失败: ' + dd.error); }
     };
     $('#cands').appendChild(el);
@@ -1136,6 +1155,23 @@ async function loadListen() {
   } catch (e) { $('#lsBody').textContent = '加载失败：' + esc(String(e)); }
 }
 function fmtT(s) { s = Math.floor(s || 0); return `${Math.floor(s/3600)}:${String(Math.floor(s%3600/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`; }
+
+async function uploadCoverBlob(bid, blobOrFile, name) {
+  if (!blobOrFile) return;
+  $('#coverMsg').textContent = '上传中…';
+  try {
+    const rr = await fetch('/api/covers/upload/' + bid, { method: 'POST', body: blobOrFile });
+    const dd = await rr.json();
+    if (dd.ok) closeCoverModal();
+    else $('#coverMsg').textContent = '上传失败: ' + dd.error;
+  } catch (e) { $('#coverMsg').textContent = '上传失败: ' + e; }
+}
+function closeCoverModal() {
+  $('#coverModal').style.display = 'none';
+  const h = pickCover._pasteHandler;
+  if (h) { document.removeEventListener('paste', h); pickCover._pasteHandler = null; }
+  loadShelf();
+}
 
 async function loadHistory() {
   const box = $('#podHis');

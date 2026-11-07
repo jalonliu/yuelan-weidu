@@ -721,7 +721,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         # HTML 页面禁缓存：reader.html 迭代频繁，避免浏览器用旧版样式（如窄 tab 固定宽度）
         if ctype.startswith("text/html"):
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control", "no-store, must-revalidate")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
