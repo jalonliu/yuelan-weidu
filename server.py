@@ -462,6 +462,61 @@ def track_load():
     return {}
 
 
+# ---------- 笔记索引（今日 / 回顾） ----------
+def notes_index():
+    """聚合微信读书全部划线与想法：notebooks -> 每本 bookmarklist/review（24h 缓存）。"""
+    nb = weread_notebooks()
+    items, books = [], []
+    for b in nb.get("books", []):
+        books.append(b)
+        try:
+            d = wr_cached("notes-" + b["bookId"], lambda bid=b["bookId"]: weread_notes(bid))
+        except Exception:
+            continue
+        for n in d.get("items", []):
+            items.append({**n, "bookId": b["bookId"], "title": b["title"],
+                          "author": b.get("author", ""), "cover": b.get("cover", "")})
+    items.sort(key=lambda x: x.get("time") or 0, reverse=True)
+    return {"ok": True, "items": items, "books": books}
+
+
+def today_brief():
+    """今日总览：阅读/收听时长、今日读过的书、今日划线与想法、旧句重逢。"""
+    import random
+    today = time.strftime("%Y-%m-%d")
+    t0 = int(time.mktime(time.strptime(today, "%Y-%m-%d")))
+    t1 = t0 + 86400
+    tr = track_load().get(today, {})
+    today_books = [{"title": v.get("title") or k, "seconds": v.get("seconds", 0),
+                    "percent": v.get("percent", 0)} for k, v in tr.items()]
+    local_sec = sum(b["seconds"] for b in today_books)
+    wr_sec = 0
+    try:
+        wr_sec = weread_today().get("todaySec", 0)
+    except Exception:
+        pass
+    try:
+        idx = notes_index()
+        items = idx["items"]
+    except Exception:
+        items = []
+    today_notes = [n for n in items if n.get("time") and t0 <= n["time"] < t1]
+    lt = time.localtime()
+    onthisday = [n for n in items if n.get("time") and n["time"] < t0
+                 and time.localtime(n["time"]).tm_mon == lt.tm_mon
+                 and time.localtime(n["time"]).tm_mday == lt.tm_mday]
+    older = [n for n in items if n.get("time") and n["time"] < t0]
+    if onthisday:
+        pick, mode = random.choice(onthisday), "onthisday"
+    elif older:
+        pick, mode = random.choice(older), "random"
+    else:
+        pick, mode = None, ""
+    return {"ok": True, "date": today, "localSec": local_sec, "listenSec": 0,
+            "wereadSec": wr_sec, "todayBooks": today_books,
+            "todayNotes": today_notes, "resurface": pick, "resurfaceMode": mode}
+
+
 def track_summary():
     data = track_load()
     days = {k: sum(v2.get("seconds", 0) for v2 in v.values()) for k, v in data.items()}
@@ -595,6 +650,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, weread_notes(bid))
             except WereadError as e:
                 self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path == "/api/notes/all":
+            try:
+                self._json(200, notes_index())
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": str(e)})
+        elif path == "/api/today":
+            try:
+                self._json(200, today_brief())
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": str(e)})
         elif path == "/api/track":
             self._json(200, track_summary())
         elif path.startswith("/api/weread/stats"):
@@ -624,6 +693,42 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = unquote_path(self.path)
+        if path == "/api/ai/chat":
+            # AI 流式输出：SSE 逐行转发 OpenAI 兼容网关（magpie / hermes ctx.llm 等价后端）
+            body = self._read_body()
+            msgs = body.get("messages") or []
+            cfg = ai_config()
+            if not msgs:
+                self._json(400, {"ok": False, "error": "messages required"})
+                return
+            payload = json.dumps({"model": cfg["model"], "stream": True,
+                                  "messages": msgs}).encode()
+            req = urllib.request.Request(cfg["endpoint"].rstrip("/") + "/chat/completions",
+                                         data=payload, method="POST")
+            req.add_header("Content-Type", "application/json")
+            if cfg.get("apiKey"):
+                req.add_header("Authorization", "Bearer " + cfg["apiKey"])
+            try:
+                resp = urllib.request.urlopen(req, timeout=300)
+            except Exception as e:
+                self._json(502, {"ok": False, "error": f"AI 网关连接失败：{e}"})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                for raw in resp:
+                    line = raw.strip()
+                    if line:
+                        self.wfile.write(line + b"\n\n")
+                        self.wfile.flush()
+            except Exception:
+                pass
+            return
         if path == "/api/track":
             body = self._read_body()
             data = track_load()
