@@ -2,6 +2,16 @@
 
 把 Calibre 本地书库变成一个开箱即用的本地阅读器：Python 标准库 HTTP 服务 + foliate-js 在线阅读，配 Hermes 桌面插件侧栏入口。零第三方依赖（服务端）、无开机自启、只监听 `127.0.0.1:8766`。
 
+## 界面
+
+| 本地书库 · 三分书架 | 阅读器 |
+|---|---|
+| ![本地书库](docs/shots/shelf.png) | ![阅读器](docs/shots/reader.png) |
+
+| 微信读书 · 在线书架 | 阅读报告 · 热力图 |
+|---|---|
+| ![微信读书](docs/shots/weread.png) | ![阅读报告](docs/shots/report.png) |
+
 ## 功能
 
 - **本地书库**：扫描 Calibre 书库（epub/mobi/azw3/fb2/pdf/txt），三分书架（书库 / 杂书架 / 18+），重名去重，封面自动匹配（豆瓣 suggest）
