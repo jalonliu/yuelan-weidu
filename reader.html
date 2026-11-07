@@ -44,6 +44,14 @@
 #pager button { cursor:pointer; border:1px solid var(--border); background:var(--card); border-radius:6px; padding:3px 10px; }
 #pager button:disabled { opacity:.4; cursor:default; }
 #grid .bk { position:relative; }
+/* 管理模式选择框：默认隐藏，body.manage 显示 */
+.bk .selbox { display:none; position:absolute; top:6px; right:6px; z-index:3; background:#fff; border:1px solid var(--border); border-radius:6px; padding:3px; cursor:pointer; }
+body.manage .bk .selbox { display:block; }
+body.manage .bk .selbox input { width:16px; height:16px; cursor:pointer; }
+body.manage .bk { outline:1px dashed var(--border); }
+#mgrBar { display:none; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; padding:10px 12px; background:var(--card); border:1px solid var(--border); border-radius:10px; position:sticky; top:8px; z-index:20; }
+#mgrBar button { cursor:pointer; border:1px solid var(--border); background:var(--background,transparent); border-radius:6px; padding:5px 10px; }
+#mgrBar b { color:#e8590c; }
 .nb { position:absolute; top:6px; left:6px; background:#e8590c; color:#fff; font-size:11px; line-height:1; padding:3px 7px; border-radius:8px; z-index:2; }
 .bk.addcard { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; min-height:210px; border-style:dashed; color:var(--muted-foreground,#888); }
 .bk.addcard .big { font-size:30px; }
@@ -348,7 +356,7 @@ function renderGrid(list) {
   for (const b of rows) {
     const el = document.createElement('div');
     el.className = 'bk';
-    el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="/cover/${b.id}">` : `<div class="ph">${(b.title[0] || '书')}</div>`}${b.opened ? '' : '<span class="nb">新增</span>'}</div>
+    el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="/cover/${b.id}">` : `<div class="ph">${(b.title[0] || '书')}</div>`}${b.opened ? '' : '<span class="nb">新增</span>'}<label class="selbox" title="选择"><input type="checkbox" data-selpath="${esc(b.path)}"></label></div>
       <div class="tt">${esc(b.title)}</div>
       <div class="au">${esc(b.author || '')}</div>
       <span class="fm">${b.format}</span>
@@ -359,6 +367,13 @@ function renderGrid(list) {
         <button class="del" data-act="del">✕ 删</button>
       </div>`;
     el.onclick = (ev) => {
+      if (ev.target?.closest?.('.selbox')) {
+        const cb = ev.target.closest('.selbox').querySelector('input');
+        const p = (cb.dataset.selpath || '').toLowerCase();
+        cb.checked ? mgrSel.add(p) : mgrSel.delete(p);
+        mgrUpdate();
+        return; // 管理模式勾选不触发打开书
+      }
       const act = ev.target?.dataset?.act;
       if (act === 'cover') return pickCover(b);
       if (act === 'del') return delBook(b);
@@ -701,9 +716,58 @@ window.loadWrWall = loadWrWall;
 window.closeModal = id => { document.getElementById(id).style.display = 'none'; };
 
 
+/* ---- 管理模式：多选批量移动/删减书架 ---- */
+let mgrSel = new Set(); // 选中书的 path
+function mgrUpdate() {
+  let bar = document.getElementById('mgrBar');
+  if (!bar) {
+    bar = document.createElement('div'); bar.id = 'mgrBar';
+    document.getElementById('toolbar').after(bar);
+  }
+  const n = mgrSel.size;
+  if (!document.body.classList.contains('manage') || !n) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.innerHTML = `<b>已选 ${n} 本</b>
+    <button data-b="main">📚 移入书库</button>
+    <button data-b="misc">🧺 移入杂书架</button>
+    <button data-b="adult">🔞 移入18+</button>
+    <button data-b="del">♻ 删除（回收站）</button>
+    <button data-b="clear">清除选择</button>`;
+  bar.querySelectorAll('button').forEach(btn => btn.onclick = () => mgrAct(btn.dataset.b));
+}
+async function mgrAct(act) {
+  if (!mgrSel.size) return;
+  const sel = [...mgrSel];
+  if (act === 'clear') { mgrSel.clear(); mgrUpdate(); renderGrid(viewList); return; }
+  if (act === 'del') {
+    if (!confirm(`把选中的 ${sel.length} 本书移入回收站？\n文件移入 _trash，可随时恢复。`)) return;
+    let ok = 0, fail = 0;
+    for (const p of sel) {
+      const b = books.find(x => (x.path || '').toLowerCase() === p.toLowerCase());
+      if (!b) { fail++; continue; }
+      try {
+        const r = await fetch('/api/manage/delete/' + b.id, { method: 'POST',
+          headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ confirm: b.title }) });
+        (await r.json()).ok ? ok++ : fail++;
+      } catch { fail++; }
+    }
+    mgrSel.clear(); mgrUpdate(); loadShelf();
+    alert(`删除完成：成功 ${ok}，失败 ${fail}（回收站可恢复）`);
+    return;
+  }
+  const r = await fetch('/api/shelf/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: sel, shelf: act }) });
+  const d = await r.json();
+  if (!d.ok) return alert('批量移动失败：' + (d.error || '?'));
+  mgrSel.clear(); mgrUpdate(); loadShelf();
+}
+
 $('#manageBtn').onclick = () => {
   document.body.classList.toggle('manage');
   $('#manageBtn').classList.toggle('on');
+  mgrSel.clear();
+  mgrUpdate();
+  renderGrid(viewList);
 };
 
 $('#rescanBtn').onclick = async () => {

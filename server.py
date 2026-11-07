@@ -71,19 +71,29 @@ def shelf_overrides():
     except Exception:
         return {}
 
-def save_shelf_override(book_id, shelf):
+def save_shelf_override(book_path, shelf):
+    """手动书架覆盖按**相对路径**（小写）持久化——此前按 book_id 存，
+    而 id 是扫描顺序位置号，每次重扫全变，手动调整会丢失。"""
     ov = shelf_overrides()
     if shelf == "auto":
-        ov.pop(str(book_id), None)
+        ov.pop(str(book_path).lower(), None)
     else:
-        ov[str(book_id)] = shelf
+        ov[str(book_path).lower()] = shelf
     json.dump(ov, open(SHELF_FILE, "w", encoding="utf-8"), ensure_ascii=False)
     return ov
 
 def classify_books(data):
     """给每本书标 shelf：adult=关键词命中或手动覆盖；main=封面+作者全且重名最优副本；其余 misc。"""
     books = data["books"]
-    ov = shelf_overrides()
+    raw_ov = shelf_overrides()
+    ov = {}
+    by_id = {str(b["id"]): (b.get("path") or "").lower() for b in books}
+    for k, v in raw_ov.items():
+        # 兼容旧数据：id 键迁移到路径键；路径键直接保留
+        if k.isdigit() and k in by_id:
+            ov[by_id[k]] = v
+        else:
+            ov[k.lower()] = v
     def norm(s):
         return NOISE.sub("", s or "").strip().lower()
     groups = {}
@@ -107,7 +117,7 @@ def classify_books(data):
                 r["_dup"] = False
     counts = {"main": 0, "misc": 0, "adult": 0}
     for b in books:
-        s = ov.get(str(b["id"]))
+        s = ov.get((b.get("path") or "").lower())
         if s not in ("main", "misc", "adult"):
             if b["_kw"]:
                 s = "adult"
@@ -973,13 +983,36 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(502, {"ok": False, "error": f"AI 调用失败：{e}"})
         elif path == "/api/shelf":
             body = self._read_body()
-            bid = str(body.get("id") or "")
             shelf = str(body.get("shelf") or "")
-            if not bid or shelf not in ("main", "misc", "adult", "auto"):
-                self._json(400, {"ok": False, "error": "id/shelf required (main|misc|adult|auto)"})
+            if shelf not in ("main", "misc", "adult", "auto"):
+                self._json(400, {"ok": False, "error": "shelf required (main|misc|adult|auto)"})
                 return
-            ov = save_shelf_override(bid, shelf)
+            # 兼容旧入参 {id}：解析成稳定路径再存
+            bpath = str(body.get("path") or "")
+            if not bpath and body.get("id") is not None:
+                data = get_meta()
+                books = data["books"]
+                for b in books:
+                    if str(b["id"]) == str(body["id"]):
+                        bpath = b["path"]
+                        break
+            if not bpath:
+                self._json(400, {"ok": False, "error": "id/path required"})
+                return
+            ov = save_shelf_override(bpath, shelf)
             self._json(200, {"ok": True, "overrides": len(ov)})
+        elif path == "/api/shelf/batch":
+            # 管理模式批量移动：{paths: [...], shelf}
+            body = self._read_body()
+            shelf = str(body.get("shelf") or "")
+            paths = body.get("paths") or []
+            if shelf not in ("main", "misc", "adult", "auto") or not paths:
+                self._json(400, {"ok": False, "error": "paths/shelf required"})
+                return
+            ov = shelf_overrides()
+            for p in paths:
+                ov = save_shelf_override(p, shelf)
+            self._json(200, {"ok": True, "moved": len(paths), "overrides": len(ov)})
         elif path == "/api/weread/refresh":
             # 清空每日缓存，强制重新拉取
             for f in os.listdir(WR_CACHE) if os.path.isdir(WR_CACHE) else []:
