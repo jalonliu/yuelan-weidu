@@ -1,0 +1,5 @@
+name: qiaomu-reader
+version: 1.0.0
+description: "阅览围读书库服务管理后端——按需唤醒 127.0.0.1:8766 本地书库服务（F:\\Users\\Calibre 书库 只读索引 + foliate 在线阅读）。桌面端配合 desktop-plugins/qiaomu-reader 提供侧栏入口与自动唤醒。"
+author: jalon
+kind: backend

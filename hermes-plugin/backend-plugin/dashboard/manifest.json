@@ -1,0 +1,8 @@
+{
+  "label": "阅览围读",
+  "description": "本地书库服务管理——按需唤醒 127.0.0.1:8766 书库服务（F:\\Users\\Calibre 书库 只读）",
+  "icon": "BookOpen",
+  "version": "1.0.0",
+  "api": "plugin_api.py",
+  "tab": { "path": "/qiaomu-reader", "hidden": true }
+}

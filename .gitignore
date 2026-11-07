@@ -1,0 +1,14 @@
+# 运行时生成 / 含凭据，绝不入库
+books.json
+shelf.json
+track.json
+weread.json
+ai.json
+wr_cache/
+_trash/
+server.log
+*.pyc
+__pycache__/
+test.epub
+cover_test.jpg
+probe.json

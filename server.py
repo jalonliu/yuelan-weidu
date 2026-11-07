@@ -1,0 +1,876 @@
+# -*- coding: utf-8 -*-
+r"""乔木阅读 Hermes 版 —— 本地书库服务 (stdlib only)
+书库根: F:\Users\Calibre 书库
+端口: 8766
+端点:
+  /                      阅读页
+  /api/books             书籍索引 JSON
+  /api/rescan            重建索引
+  /file/<id>             书籍文件流
+  /cover/<id>            封面 (Calibre 或在线匹配下载)
+  /foliate/*             foliate-js 静态文件
+  /api/covers/search/<id>   在线搜索封面候选 (豆瓣)
+  /api/covers/apply/<id>    应用候选封面 (POST {url})
+  /api/manage/delete/<id>   移入回收站 _trash (POST {confirm: 书名}, 可恢复)
+  /api/manage/trash         回收站列表
+  /api/manage/restore/<key> 从回收站恢复
+"""
+import json
+import os
+import re
+import shutil
+import sqlite3
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+LIB_ROOT = os.environ.get("QMU_LIB_ROOT", r"F:\Users\Calibre 书库")
+CALIBRE_LIB = os.path.join(LIB_ROOT, "Calibre 书库")
+CALIBRE_DB = os.path.join(CALIBRE_LIB, "metadata.db")
+FOLIATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "foliate-js")
+PORT = 8766
+BOOK_EXT = {".epub", ".mobi", ".azw3", ".fb2"}
+INDEX_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "books.json")
+TRASH_DIR = os.path.join(LIB_ROOT, "_trash")
+TRASH_META = os.path.join(TRASH_DIR, ".trash-meta.json")
+SKIP_DIRS = {".calibre", ".Trash", "_trash"}
+# 微信读书 Agent Gateway（参考 zhaohongxuan/dsh-weread，仅 API-Key 路径）
+WEREAD_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weread.json")
+WEREAD_URL = "https://i.weread.qq.com/api/agent/gateway"
+WEREAD_SKILL_VERSION = "1.0.3"
+# 每日增量缓存（TTL 24h，结构参考 dsh-weread store/cache）
+WR_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wr_cache")
+WR_TTL = 24 * 3600
+# 本地阅读跟踪
+TRACK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "track.json")
+# 三分书架：书库 main / 杂书架 misc / 18+ adult（手动覆盖存 shelf.json）
+SHELF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shelf.json")
+FMT_RANK = {"epub": 0, "azw3": 1, "mobi": 2, "pdf": 3, "fb2": 4, "txt": 5}
+ADULT_KW = re.compile(
+    r"淫|乱伦|人妻|少妇|猎艳|白洁|肉欲|情色|nude|erotic|春宫|嫖|娼|妓院|婬|"
+    r"淫荡|放荡|偷情|欲女|艳遇|销魂|花丛|采花|风月|房中术|素女|肉蒲团|金瓶梅|"
+    r"泡妞|把妹|艳史|艳情|猎艳|迷奸|性爱|做爱|援交|夜店女|KTV经历", re.I)
+# AI 总结（走本机 magpie OpenAI 兼容网关）
+AI_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai.json")
+AI_DEFAULT = {"endpoint": "http://127.0.0.1:3425/v1", "model": "group/free", "apiKey": ""}
+PROXY = {"https": "http://127.0.0.1:7897", "http": "http://127.0.0.1:7897"}
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+
+NOISE = re.compile(r"\s*[\(\[（【]\s*(Z-Library|作者[:：]|1-\d+|全本|精校版|上下册|\d+)[^\)\]）】]*[\)\]）】]", re.I)
+LOCK = threading.Lock()
+
+
+# ---------- 三分书架 ----------
+def shelf_overrides():
+    try:
+        return json.load(open(SHELF_FILE, encoding="utf-8"))
+    except Exception:
+        return {}
+
+def save_shelf_override(book_id, shelf):
+    ov = shelf_overrides()
+    if shelf == "auto":
+        ov.pop(str(book_id), None)
+    else:
+        ov[str(book_id)] = shelf
+    json.dump(ov, open(SHELF_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    return ov
+
+def classify_books(data):
+    """给每本书标 shelf：adult=关键词命中或手动覆盖；main=封面+作者全且重名最优副本；其余 misc。"""
+    books = data["books"]
+    ov = shelf_overrides()
+    def norm(s):
+        return NOISE.sub("", s or "").strip().lower()
+    groups = {}
+    for b in books:
+        try:
+            p = os.path.join(LIB_ROOT, b.get("path") or "")
+            b["mtime"] = int(os.stat(p).st_mtime) if os.path.isfile(p) else 0
+        except OSError:
+            b["mtime"] = 0
+        b["_kw"] = bool(ADULT_KW.search(b.get("title") or ""))
+        groups.setdefault(norm(b.get("title")), []).append(b)
+    for rows in groups.values():
+        if len(rows) > 1:
+            best = sorted(rows, key=lambda x: (x["_kw"], not x.get("cover"),
+                                               FMT_RANK.get(x.get("format", "").lower(), 9),
+                                               -int(x.get("size") or 0)))[0]
+            for r in rows:
+                r["_dup"] = r is not best
+        else:
+            for r in rows:
+                r["_dup"] = False
+    counts = {"main": 0, "misc": 0, "adult": 0}
+    for b in books:
+        s = ov.get(str(b["id"]))
+        if s not in ("main", "misc", "adult"):
+            if b["_kw"]:
+                s = "adult"
+            elif b["_dup"] or not b.get("cover") or not (b.get("author") or "").strip():
+                s = "misc"
+            else:
+                s = "main"
+        b["shelf"] = s
+        counts[s] += 1
+    return books, counts
+
+def _http_get(url, referer=None, timeout=15):
+    op = urllib.request.build_opener(urllib.request.ProxyHandler(PROXY))
+    headers = [("User-Agent", UA)]
+    if referer:
+        headers.append(("Referer", referer))
+    op.addheaders = headers
+    return op.open(url, timeout=timeout).read()
+
+
+def clean_title(fn):
+    name = os.path.splitext(fn)[0]
+    name = NOISE.sub("", name)
+    m = re.match(r"^(.*?)\s*[\(（]([^\(）]{1,20})[\)）]\s*$", name)
+    if m and len(m.group(2)) <= 20 and "书" not in m.group(2)[:2]:
+        return m.group(1).strip(), m.group(2).strip()
+    return name.strip(), ""
+
+
+def load_calibre_meta():
+    """(完整文件路径小写) -> (title, author, cover_path)"""
+    meta = {}
+    if not os.path.isfile(CALIBRE_DB):
+        return meta
+    try:
+        con = sqlite3.connect(CALIBRE_DB)
+        rows = con.execute(
+            "SELECT b.title, GROUP_CONCAT(a.name), b.path, d.name, d.format FROM books b "
+            "LEFT JOIN books_authors_link bal ON bal.book = b.id "
+            "LEFT JOIN authors a ON a.id = bal.author "
+            "JOIN data d ON d.book = b.id GROUP BY b.id, d.id").fetchall()
+        for title, author, path, fname, fmt in rows:
+            full = os.path.normpath(os.path.join(CALIBRE_LIB, path, fname + "." + fmt)).lower()
+            meta[full] = (title.strip(), author or "",
+                          os.path.join(CALIBRE_LIB, path, "cover.jpg") if path else "")
+        con.close()
+    except sqlite3.Error as e:
+        print(f"[warn] metadata.db 读取失败: {e}", file=sys.stderr)
+    return meta
+
+
+def build_index():
+    """全量重建索引并写缓存。"""
+    calibre_meta = load_calibre_meta()
+    books, covers, seen = [], {}, set()
+    for dirpath, dirs, files in os.walk(LIB_ROOT):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in sorted(files):
+            ext = os.path.splitext(f)[1].lower()
+            kind = ("epub" if ext == ".epub" else
+                    "pdf" if ext == ".pdf" else
+                    "text" if ext == ".txt" else
+                    "book" if ext in BOOK_EXT else None)
+            if not kind:
+                continue
+            full = os.path.join(dirpath, f)
+            rel = os.path.relpath(full, LIB_ROOT)
+            if rel.lower() in seen:
+                continue
+            seen.add(rel.lower())
+            title, author = clean_title(f)
+            cover_path = ""
+            if os.path.normpath(full).lower() in calibre_meta:
+                title, author, cover_path = calibre_meta[os.path.normpath(full).lower()]
+            # 在线匹配下载过的封面: 书旁 cover.jpg
+            local_cover = os.path.join(dirpath, "cover.jpg")
+            if not cover_path and os.path.isfile(local_cover):
+                cover_path = local_cover
+            books.append({
+                "id": len(books),
+                "title": title,
+                "author": author,
+                "format": ext.lstrip("."),
+                "kind": kind,
+                "path": rel,
+                "size": os.path.getsize(full),
+                "cover": bool(cover_path),
+            })
+            if cover_path:
+                covers[str(books[-1]["id"])] = cover_path
+    json.dump({"count": len(books), "books": books, "covers": covers},
+              open(INDEX_CACHE, "w", encoding="utf8"), ensure_ascii=False)
+    return books
+
+
+def get_meta():
+    with open(INDEX_CACHE, encoding="utf8") as f:
+        return json.load(f)
+
+
+def save_meta(data):
+    json.dump(data, open(INDEX_CACHE, "w", encoding="utf8"), ensure_ascii=False)
+
+
+def load_trash_meta():
+    if os.path.isfile(TRASH_META):
+        return json.load(open(TRASH_META, encoding="utf8"))
+    return {}
+
+
+def save_trash_meta(m):
+    json.dump(m, open(TRASH_META, "w", encoding="utf8"), ensure_ascii=False, indent=1)
+
+
+class WereadError(Exception):
+    def __init__(self, code, msg, status=502):
+        super().__init__(msg)
+        self.code = code
+        self.status = status
+
+
+def weread_cfg():
+    if os.path.isfile(WEREAD_CFG):
+        return json.load(open(WEREAD_CFG, encoding="utf-8"))
+    return {"apiKey": "", "proxy": "http://127.0.0.1:7897"}
+
+
+def save_weread_cfg(cfg):
+    json.dump(cfg, open(WEREAD_CFG, "w", encoding="utf-8"), ensure_ascii=False)
+
+
+def weread_call(api_name, params=None):
+    cfg = weread_cfg()
+    key = cfg.get("apiKey", "")
+    if not key:
+        raise WereadError("weread/no-key", "未配置微信读书 API Key", 401)
+    body = json.dumps({"api_name": api_name, "skill_version": WEREAD_SKILL_VERSION,
+                       **(params or {})}).encode()
+    proxy = cfg.get("proxy") or ""
+    handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy else {})]
+    op = urllib.request.build_opener(*handlers)
+    op.addheaders = [
+        ("Authorization", f"Bearer {key}"),
+        ("Content-Type", "application/json"),
+        ("accept", "application/json, text/plain, */*"),
+        ("User-Agent", UA),
+    ]
+    try:
+        resp = op.open(urllib.request.Request(WEREAD_URL, data=body, method="POST"), timeout=30)
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            raise WereadError("weread/unauthorized", "API Key 无效或已过期", 401)
+        if e.code == 403:
+            raise WereadError("weread/blocked",
+                              "微信读书拒绝了当前网络出口（风控 403）。Key 可能有效，请改用可访问微信读书的代理。", 403)
+        raise WereadError("weread/http", f"微信读书接口返回 HTTP {e.code}", 502)
+    except Exception as e:
+        raise WereadError("weread/network", f"请求微信读书失败：{e}", 502)
+    try:
+        data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        raise WereadError("weread/parse", f"微信读书返回非 JSON：{e}", 502)
+    errcode = data.get("errcode") if isinstance(data, dict) else None
+    if isinstance(errcode, int) and errcode != 0:
+        raise WereadError(f"weread/{errcode}",
+                          data.get("errmsg") or f"微信读书错误码 {errcode}", 200)
+    return data
+
+
+def weread_shelf():
+    def _load():
+        raw = weread_call("/shelf/sync")
+        rows = raw.get("notebooks") or raw.get("books") or []
+        books = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            b = row.get("book") if isinstance(row.get("book"), dict) else row
+            book_id = str(b.get("bookId") or row.get("bookId") or "")
+            if not book_id:
+                continue
+            cover = str(b.get("cover") or "")
+            cover = cover.replace("/s_", "/t7_") if cover else ""
+            prog = row.get("readingProgress") or 0
+            books.append({
+                "bookId": book_id,
+                "title": str(b.get("title") or ""),
+                "author": str(b.get("author") or ""),
+                "cover": cover,
+                "progress": min(100, max(0, prog if isinstance(prog, (int, float)) else 0)),
+                "noteCount": row.get("noteCount") or 0,
+                "reviewCount": row.get("reviewCount") or 0,
+                "lastRead": int(row.get("readUpdateTime") or row.get("sort") or 0),
+                "deepLink": str(row.get("deepLink") or b.get("deepLink") or ""),
+                "readerLink": str(row.get("readerLink") or b.get("readerLink") or ""),
+            })
+        return {"ok": True, "count": len(books), "books": books}
+    return wr_cached("shelf", _load)
+
+
+def wr_cached(name, fn):
+    """每日增量缓存：wr_cache/<name>.json，TTL 24h。"""
+    os.makedirs(WR_CACHE, exist_ok=True)
+    path = os.path.join(WR_CACHE, name + ".json")
+    if os.path.isfile(path) and time.time() - os.path.getmtime(path) < WR_TTL:
+        try:
+            data = json.load(open(path, encoding="utf-8"))
+            if isinstance(data, dict) and data.get("ok"):
+                return data
+        except Exception:
+            pass
+    data = fn()
+    if isinstance(data, dict) and data.get("ok"):
+        json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+    return data
+
+
+def weread_notebooks():
+    def _load():
+        raw = weread_call("/user/notebooks")
+        rows = raw.get("notebooks") or raw.get("books") or []
+        books = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            b = row.get("book") if isinstance(row.get("book"), dict) else {}
+            cover = str(b.get("cover") or "")
+            cover = cover.replace("/s_", "/t7_") if cover else ""
+            books.append({
+                "bookId": str(b.get("bookId") or ""),
+                "title": str(b.get("title") or ""),
+                "author": str(b.get("author") or ""),
+                "cover": cover,
+                "noteCount": row.get("noteCount") or 0,
+                "reviewCount": row.get("reviewCount") or 0,
+                "lastRead": (row.get("lastReadTime") or 0),
+                "deepLink": str(b.get("deepLink") or ""),
+            })
+        books.sort(key=lambda x: x["lastRead"], reverse=True)
+        return {"ok": True, "count": len(books), "books": books}
+    return wr_cached("notebooks", _load)
+
+
+def weread_notes(book_id):
+    raw_marks = weread_call("/book/bookmarklist", {"bookId": book_id})
+    marks = raw_marks.get("updated") or []
+    items = [{"type": "highlight", "chapter": m.get("chapterName") or "",
+              "text": m.get("markText") or "", "time": m.get("createTime")} for m in marks]
+    try:
+        raw_rev = weread_call("/review/list/mine", {"bookId": book_id})
+        for r in (raw_rev.get("reviews") or []):
+            r = r.get("review") or r
+            items.append({"type": "review", "chapter": (r.get("chapterName") or ""),
+                          "text": r.get("content") or "", "time": r.get("createTime")})
+    except Exception:
+        pass
+    items.sort(key=lambda x: x.get("time") or 0, reverse=True)
+    return {"ok": True, "items": items}
+
+
+def weread_today():
+    now = time.localtime()
+    month_start = int(time.mktime((now.tm_year, now.tm_mon, 1, 0, 0, 0, 0, 0, -1)))
+    raw = weread_call("/readdata/detail", {"mode": "monthly", "baseTime": month_start})
+    today_key = str(int(time.mktime((now.tm_year, now.tm_mon, now.tm_mday, 0, 0, 0, 0, 0, -1))))
+    today = (raw.get("readTimes") or {}).get(today_key, 0)
+    return {"ok": True, "todaySec": today, "date": time.strftime("%Y-%m-%d")}
+
+
+def weread_heatmap(year):
+    def _load():
+        daily = {}
+        for m in range(1, 13):
+            base = int(time.mktime((year, m, 1, 0, 0, 0, 0, 0, -1)))
+            try:
+                raw = weread_call("/readdata/detail", {"mode": "monthly", "baseTime": base})
+                for k, v in (raw.get("readTimes") or {}).items():
+                    daily[k] = daily.get(k, 0) + v
+            except Exception:
+                pass
+        return {"ok": True, "year": year, "daily": daily}
+    return wr_cached(f"heatmap-{year}", _load)
+
+
+def weread_bookwall():
+    shelf = weread_shelf()
+    wall = {}
+    for b in shelf.get("books", []):
+        if not b.get("lastRead"):
+            continue
+        t = time.localtime(b["lastRead"])
+        y, m = t.tm_year, t.tm_mon
+        wall.setdefault(y, {}).setdefault(m, []).append(b)
+    return {"ok": True, "wall": {str(y): {str(m): v for m, v in mm.items()}
+                                 for y, mm in sorted(wall.items(), reverse=True)}}
+
+
+def weread_stats(params):
+    return {"ok": True, "stats": weread_call("/readdata/detail", params)}
+
+
+def ai_config():
+    if os.path.isfile(AI_CFG):
+        try:
+            cfg = json.load(open(AI_CFG, encoding="utf-8"))
+            return {**AI_DEFAULT, **cfg}
+        except Exception:
+            pass
+    return AI_DEFAULT
+
+
+def ai_cache_read(key):
+    path = os.path.join(WR_CACHE, f"ai-{key}.json")
+    if os.path.isfile(path):
+        try:
+            return json.load(open(path, encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
+def ai_cache_write(key, data):
+    os.makedirs(WR_CACHE, exist_ok=True)
+    json.dump(data, open(os.path.join(WR_CACHE, f"ai-{key}.json"), "w", encoding="utf-8"),
+              ensure_ascii=False)
+
+
+def ai_summary(title, highlights):
+    cfg = ai_config()
+    text = "\n".join(f"- {h['text']}" for h in highlights[:40] if h.get("text")) or title
+    prompt = (f"这是我在微信读书读《{title}》时的划线笔记：\n{text}\n\n"
+              "请用中文输出：1) 一段 150 字左右的核心主题总结；2) 3 条给我自己的行动启发。"
+              "直接输出，不要客套。")
+    body = json.dumps({"model": cfg["model"], "stream": False,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = urllib.request.Request(cfg["endpoint"].rstrip("/") + "/chat/completions",
+                                 data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if cfg.get("apiKey"):
+        req.add_header("Authorization", "Bearer " + cfg["apiKey"])
+    resp = urllib.request.urlopen(req, timeout=120)
+    data = json.loads(resp.read().decode("utf-8"))
+    content = data["choices"][0]["message"]["content"]
+    return content
+
+
+def track_load():
+    if os.path.isfile(TRACK_FILE):
+        try:
+            return json.load(open(TRACK_FILE, encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def track_summary():
+    data = track_load()
+    days = {k: sum(v2.get("seconds", 0) for v2 in v.values()) for k, v in data.items()}
+    books = {}
+    for v in data.values():
+        for bid, b in v.items():
+            t = books.setdefault(bid, {"title": b.get("title") or bid,
+                                       "seconds": 0, "lastPercent": 0, "days": 0})
+            t["seconds"] += b.get("seconds", 0)
+            t["lastPercent"] = max(t["lastPercent"], b.get("percent") or 0)
+            t["days"] += 1
+    top = sorted(books.values(), key=lambda x: -x["seconds"])[:10]
+    today = time.strftime("%Y-%m-%d")
+    return {"ok": True, "todaySec": days.get(today, 0),
+            "days": {k: v for k, v in sorted(days.items())},
+            "totalSec": sum(days.values()), "dayCount": len(days),
+            "topBooks": top, "bookCount": len(books)}
+
+
+def cover_search(q):
+    """豆瓣 suggest 接口 -> 候选列表"""
+    url = "https://book.douban.com/j/subject_suggest?q=" + urllib.parse.quote(q)
+    try:
+        data = json.loads(_http_get(url, timeout=12).decode("utf-8"))
+    except Exception as e:
+        return {"ok": False, "error": str(e), "candidates": []}
+    cands = []
+    for it in data:
+        if it.get("type") == "b" and it.get("pic"):
+            cands.append({
+                "title": it.get("title", ""),
+                "author": it.get("author_name", ""),
+                "year": it.get("year", ""),
+                "url": it.get("pic", ""),
+            })
+    return {"ok": True, "candidates": cands[:6]}
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8", extra=None):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        # HTML 页面禁缓存：reader.html 迭代频繁，避免浏览器用旧版样式（如窄 tab 固定宽度）
+        if ctype.startswith("text/html"):
+            self.send_header("Cache-Control", "no-cache")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, code, obj):
+        self._send(code, json.dumps(obj, ensure_ascii=False).encode())
+
+    def _read_body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if not n:
+            return {}
+        try:
+            return json.loads(self.rfile.read(n).decode("utf-8"))
+        except ValueError:
+            return {}
+
+    def do_GET(self):
+        path = unquote_path(self.path)
+        if path in ("/", "/index.html"):
+            body = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "reader.html"), "rb").read()
+            self._send(200, body, "text/html; charset=utf-8")
+        elif path.split("?")[0] == "/api/books":
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            want = (qs.get("shelf") or ["main"])[0]
+            data = get_meta()
+            books, counts = classify_books(data)
+            order = {"main": 0, "adult": 1, "misc": 2}
+            rows = [b for b in books if want == "all" or b["shelf"] == want]
+            rows.sort(key=lambda b: (-b.get("mtime", 0), order.get(b["shelf"], 9), str(b["title"])))
+            self._json(200, {"count": len(rows), "total": data["count"], "shelves": counts,
+                             "books": [{k: v for k, v in b.items() if not k.startswith("_")} for b in rows]})
+        elif path == "/api/rescan":
+            with LOCK:
+                books = build_index()
+            self._json(200, {"ok": True, "count": len(books)})
+        elif path == "/api/health":
+            self._send(200, b'{"ok":true}')
+        elif path.startswith("/api/covers/search/"):
+            self._cover_search(path.rsplit("/", 1)[1])
+        elif path == "/api/manage/trash":
+            meta = load_trash_meta()
+            items = [{"key": t, **m} for t, m in sorted(meta.items(), reverse=True)
+                     if os.path.isfile(os.path.join(TRASH_DIR, t))]
+            self._json(200, {"items": items})
+        elif path == "/api/weread/config":
+            cfg = weread_cfg()
+            key = cfg.get("apiKey", "")
+            self._json(200, {"apiKey": (key[:3] + "****" + key[-4:]) if len(key) > 7 else ("已配置" if key else ""), "proxy": cfg.get("proxy", "")})
+        elif path == "/api/weread/shelf":
+            try:
+                self._json(200, weread_shelf())
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path == "/api/weread/notebooks":
+            try:
+                self._json(200, weread_notebooks())
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path == "/api/weread/today":
+            try:
+                self._json(200, weread_today())
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path == "/api/weread/bookwall":
+            try:
+                self._json(200, weread_bookwall())
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path.startswith("/api/weread/heatmap/"):
+            year = int(path.rsplit("/", 1)[1])
+            try:
+                self._json(200, weread_heatmap(year))
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path.startswith("/api/weread/notes/"):
+            bid = path.rsplit("/", 1)[1]
+            try:
+                self._json(200, weread_notes(bid))
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path == "/api/track":
+            self._json(200, track_summary())
+        elif path.startswith("/api/weread/stats"):
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            mode = (qs.get("mode") or ["overall"])[0]
+            params = {"mode": mode}
+            if qs.get("baseTime"):
+                params["baseTime"] = int(qs["baseTime"][0])
+            try:
+                self._json(200, weread_stats(params))
+            except WereadError as e:
+                self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path.startswith("/file/"):
+            self._serve_book(path[len("/file/"):])
+        elif path.startswith("/cover/"):
+            self._serve_cover(path[len("/cover/"):])
+        elif path.startswith("/foliate/"):
+            fp = os.path.normpath(os.path.join(FOLIATE_DIR, path[len("/foliate/"):]))
+            if not fp.startswith(os.path.normpath(FOLIATE_DIR)) or not os.path.isfile(fp):
+                self._send(404, b"not found", "text/plain")
+                return
+            body = open(fp, "rb").read()
+            ct = "text/javascript" if fp.endswith(".js") else "text/html" if fp.endswith(".html") else "application/octet-stream"
+            self._send(200, body, ct)
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def do_POST(self):
+        path = unquote_path(self.path)
+        if path == "/api/track":
+            body = self._read_body()
+            data = track_load()
+            today = time.strftime("%Y-%m-%d")
+            day = data.setdefault(today, {})
+            bid = str(body.get("bookId") or "unknown")
+            rec = day.setdefault(bid, {"title": body.get("title") or bid,
+                                       "seconds": 0, "percent": 0})
+            rec["seconds"] += max(0, int(body.get("delta") or 0))
+            rec["percent"] = max(rec["percent"], int(body.get("percent") or 0))
+            json.dump(data, open(TRACK_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+            self._json(200, {"ok": True})
+        elif path == "/api/ai/summary":
+            body = self._read_body()
+            key = str(body.get("key") or "")
+            title = str(body.get("title") or "")
+            if not key or not title:
+                self._json(400, {"ok": False, "error": "key/title required"})
+                return
+            cached = ai_cache_read(key)
+            if cached:
+                self._json(200, cached)
+                return
+            try:
+                content = ai_summary(title, body.get("highlights") or [])
+                out = {"ok": True, "summary": content, "cachedAt": int(time.time())}
+                ai_cache_write(key, out)
+                self._json(200, out)
+            except Exception as e:
+                self._json(502, {"ok": False, "error": f"AI 调用失败：{e}"})
+        elif path == "/api/shelf":
+            body = self._read_body()
+            bid = str(body.get("id") or "")
+            shelf = str(body.get("shelf") or "")
+            if not bid or shelf not in ("main", "misc", "adult", "auto"):
+                self._json(400, {"ok": False, "error": "id/shelf required (main|misc|adult|auto)"})
+                return
+            ov = save_shelf_override(bid, shelf)
+            self._json(200, {"ok": True, "overrides": len(ov)})
+        elif path == "/api/weread/refresh":
+            # 清空每日缓存，强制重新拉取
+            for f in os.listdir(WR_CACHE) if os.path.isdir(WR_CACHE) else []:
+                if f.endswith(".json") and not f.startswith("ai-"):
+                    try:
+                        os.remove(os.path.join(WR_CACHE, f))
+                    except Exception:
+                        pass
+            self._json(200, {"ok": True, "cleared": True})
+        if path == "/api/weread/config":
+            body = self._read_body()
+            cfg = weread_cfg()
+            if body.get("apiKey"):
+                cfg["apiKey"] = str(body["apiKey"]).strip()
+            if "proxy" in body:
+                cfg["proxy"] = str(body["proxy"]).strip()
+            save_weread_cfg(cfg)
+            self._json(200, {"ok": True, "masked": (cfg["apiKey"][:3] + "****" + cfg["apiKey"][-4:]) if len(cfg["apiKey"]) > 7 else bool(cfg["apiKey"])})
+        elif path.startswith("/api/covers/apply/"):
+            self._cover_apply(path.rsplit("/", 1)[1])
+        elif path.startswith("/api/manage/delete/"):
+            self._delete_book(path.rsplit("/", 1)[1])
+        elif path.startswith("/api/manage/restore/"):
+            self._restore(path.rsplit("/", 1)[1])
+        elif path == "/api/open-browser":
+            # 用系统默认浏览器打开书库页（从桌面插件 iframe 跳出到全窗口阅读）
+            try:
+                os.startfile("http://127.0.0.1:8766/")
+                self._json(200, {"ok": True})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": str(e)})
+        elif path == "/api/manage/purge":
+            self._purge(None)
+        elif path.startswith("/api/manage/purge/"):
+            self._purge(path.rsplit("/", 1)[1])
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    # ---------- 封面 ----------
+    def _cover_search(self, bid):
+        data = get_meta()
+        book = next((b for b in data["books"] if str(b["id"]) == bid), None)
+        if not book:
+            self._json(404, {"ok": False, "error": "book not found"})
+            return
+        q = book["title"] + ((" " + book["author"]) if book["author"] else "")
+        self._json(200, dict(query=q, **cover_search(q)))
+
+    def _cover_apply(self, bid):
+        body = self._read_body()
+        url = body.get("url", "")
+        if not url:
+            self._json(400, {"ok": False, "error": "missing url"})
+            return
+        data = get_meta()
+        book = next((b for b in data["books"] if str(b["id"]) == bid), None)
+        if not book:
+            self._json(404, {"ok": False, "error": "book not found"})
+            return
+        full = os.path.join(LIB_ROOT, book["path"])
+        dest = os.path.join(os.path.dirname(full), "cover.jpg")
+        try:
+            img = None
+            big = url.replace("/view/subject/s/public/", "/view/subject/l/public/")
+            for u in (big, url):
+                try:
+                    img = _http_get(u, referer="https://book.douban.com/")
+                    if img and len(img) > 1000:
+                        break
+                except Exception:
+                    continue
+            if not img:
+                raise RuntimeError("封面下载失败")
+            with LOCK:
+                open(dest, "wb").write(img)
+                data["covers"][bid] = dest
+                book["cover"] = True
+                save_meta(data)
+            self._json(200, {"ok": True, "cover": dest, "bytes": len(img)})
+        except Exception as e:
+            self._json(500, {"ok": False, "error": str(e)})
+
+    # ---------- 管理 ----------
+    def _delete_book(self, bid):
+        body = self._read_body()
+        data = get_meta()
+        book = next((b for b in data["books"] if str(b["id"]) == bid), None)
+        if not book:
+            self._json(404, {"ok": False, "error": "book not found"})
+            return
+        full = os.path.join(LIB_ROOT, book["path"])
+        if body.get("confirm") != book["title"]:
+            self._json(400, {"ok": False, "error": "confirm 不匹配", "need": book["title"]})
+            return
+        if not os.path.isfile(full):
+            self._json(410, {"ok": False, "error": "文件已不存在"})
+            return
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        os.makedirs(TRASH_DIR, exist_ok=True)
+        tname = f"{ts}_{os.path.basename(full)}"
+        shutil.move(full, os.path.join(TRASH_DIR, tname))
+        meta = load_trash_meta()
+        meta[tname] = {"orig": book["path"], "deleted_at": ts,
+                       "title": book["title"], "author": book["author"], "format": book["format"]}
+        save_trash_meta(meta)
+        with LOCK:
+            data["books"] = [b for b in data["books"] if str(b["id"]) != bid]
+            data["covers"].pop(bid, None)
+            data["count"] = len(data["books"])
+            save_meta(data)
+        self._json(200, {"ok": True, "trash_name": tname, "restorable": True})
+
+    def _restore(self, key):
+        meta = load_trash_meta()
+        m = meta.get(key)
+        if not m:
+            self._json(404, {"ok": False, "error": "trash item not found"})
+            return
+        src = os.path.join(TRASH_DIR, key)
+        dest = os.path.join(LIB_ROOT, m["orig"])
+        if not os.path.isfile(src):
+            self._json(410, {"ok": False, "error": "回收站文件已不存在"})
+            return
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.move(src, dest)
+        meta.pop(key)
+        save_trash_meta(meta)
+        with LOCK:
+            build_index()
+        self._json(200, {"ok": True, "restored_to": m["orig"]})
+
+    def _purge(self, key):
+        """彻底删除回收站条目：key=None 清空全部。删除后索引重建，本地文件一并清除。"""
+        body = self._read_body()
+        meta = load_trash_meta()
+        if key is None:
+            if body.get("confirm") != "清空回收站":
+                self._json(400, {"ok": False, "error": "confirm 不匹配", "need": "清空回收站"})
+                return
+            targets = list(meta.keys())
+        else:
+            m = meta.get(key)
+            if not m:
+                self._json(404, {"ok": False, "error": "trash item not found"})
+                return
+            if body.get("confirm") != m.get("title"):
+                self._json(400, {"ok": False, "error": "confirm 不匹配", "need": m.get("title")})
+                return
+            targets = [key]
+        removed, failed = 0, []
+        for k in targets:
+            p = os.path.join(TRASH_DIR, k)
+            try:
+                if os.path.isdir(p):
+                    shutil.rmtree(p)
+                elif os.path.isfile(p):
+                    os.remove(p)
+                meta.pop(k, None)
+                removed += 1
+            except Exception as e:
+                failed.append({"key": k, "error": str(e)})
+        save_trash_meta(meta)
+        with LOCK:
+            build_index()
+        self._json(200, {"ok": not failed, "removed": removed, "failed": failed})
+
+    # ---------- 原有 ----------
+    def _serve_book(self, bid):
+        try:
+            data = get_meta()
+            book = next(b for b in data["books"] if str(b["id"]) == bid)
+        except (StopIteration, OSError):
+            self._send(404, b"book not found", "text/plain")
+            return
+        full = os.path.join(LIB_ROOT, book["path"])
+        try:
+            body = open(full, "rb").read()
+        except OSError as e:
+            self._send(500, str(e).encode(), "text/plain")
+            return
+        ct = {"epub": "application/epub+zip", "pdf": "application/pdf",
+              "mobi": "application/x-mobipocket-ebook", "azw3": "application/x-mobipocket-ebook",
+              "fb2": "application/x-fictionbook+xml", "txt": "text/plain; charset=utf-8"}.get(book["format"], "application/octet-stream")
+        self._send(200, body, ct)
+
+    def _serve_cover(self, bid):
+        try:
+            data = get_meta()
+            cov = data["covers"][bid]
+        except (KeyError, OSError):
+            self._send(404, b"no cover", "text/plain")
+            return
+        full = cov if os.path.isabs(cov) else os.path.join(LIB_ROOT, cov)
+        try:
+            body = open(full, "rb").read()
+        except OSError:
+            self._send(404, b"no cover", "text/plain")
+            return
+        self._send(200, body, "image/jpeg")
+
+
+def unquote_path(p):
+    return urllib.parse.unquote(urllib.parse.urlsplit(p).path)
+
+
+if __name__ == "__main__":
+    books = build_index()
+    print(f"书库索引: {len(books)} 本，缓存 {INDEX_CACHE}")
+    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    print(f"乔木阅读服务: http://127.0.0.1:{PORT}/")
+    srv.serve_forever()

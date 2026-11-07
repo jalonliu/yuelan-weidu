@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>阅览围读 · Hermes</title>
+<style>
+  :root { --bg:#f7f6f3; --card:#fff; --fg:#2b2b2b; --muted:#8a8a86; --accent:#3a7d6d; --border:#e5e3dd; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Microsoft YaHei",system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  /* 书架 */
+  #shelf { max-width:1080px; margin:0 auto; padding:24px 16px 60px; }
+  #shelf h1 { font-size:20px; font-weight:600; margin:4px 0 2px; }
+  #shelf .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  #search { width:100%; max-width:420px; padding:8px 14px; border:1px solid var(--border); border-radius:8px; font-size:14px; background:var(--card); outline:none; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:14px; margin-top:20px; }
+  .bk { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px; cursor:pointer; transition:box-shadow .15s; overflow:hidden; }
+  .bk:hover { box-shadow:0 4px 14px rgba(0,0,0,.10); }
+  .bk .cv { height:150px; border-radius:6px; background:#e8e6e0; display:flex; align-items:center; justify-content:center; overflow:hidden; margin-bottom:8px; }
+  .bk .cv img { width:100%; height:100%; object-fit:cover; }
+  .bk .cv .ph { color:#a09c94; font-size:26px; font-weight:700; }
+  .bk .tt { font-size:13px; font-weight:600; line-height:1.35; max-height:2.7em; overflow:hidden; }
+  .bk .au { font-size:11px; color:var(--muted); margin-top:3px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bk .fm { display:inline-block; font-size:10px; margin-top:5px; padding:1px 7px; border-radius:9px; background:var(--accent); color:#fff; text-transform:uppercase; }
+  /* 阅读器 —— codex 淡雅白主题 */
+  #reader { display:none; position:fixed; inset:0; background:#f6f5f2; flex-direction:column; }
+  #bar { display:flex; gap:10px; align-items:center; padding:8px 14px; background:#fdfcf9; color:#3d3d3a; font-size:13px; border-bottom:1px solid #e8e6e0; }
+  #bar button { background:#fff; color:#3d3d3a; border:1px solid #e2e0da; border-radius:6px; padding:5px 12px; cursor:pointer; font-size:13px; }
+  #bar button:hover { border-color:#b8b5ad; background:#f6f5f2; }
+  #bar button.on { background:#1c1c1a; color:#fff; border-color:#1c1c1a; }
+  #bar .tt { flex:1; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#1c1c1a; }
+  #bar .pg { color:#8a8a86; min-width:80px; text-align:right; }
+  #stage { flex:1; overflow:hidden; display:flex; justify-content:center; background:#f6f5f2; }
+  #stage foliate-view { width:100%; max-width:860px; height:100%; margin:0 auto; }
+  #stage foliate-view.spread { max-width:1400px; }
+  #stage iframe.pdfview { width:100%; height:100%; border:none; background:#fff; }
+  #toc { position:fixed; left:0; top:42px; bottom:0; width:280px; background:#fdfcf9; color:#3d3d3a; overflow:auto; padding:12px; font-size:13px; display:none; border-right:1px solid #e8e6e0; z-index:10; }
+  #toc a { display:block; padding:5px 8px; border-radius:5px; color:#3d3d3a; text-decoration:none; cursor:pointer; }
+  #toc a:hover { background:#f0eee9; }
+  #err { position:fixed; inset:41px 0 0; display:none; align-items:center; justify-content:center; color:#f66; font-size:14px; padding:30px; text-align:center; }
+  /* 管理模式 */
+  #toolbar { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+  #toolbar button { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:6px 14px; font-size:13px; cursor:pointer; color:var(--fg); }
+  #toolbar button:hover { border-color:var(--accent); color:var(--accent); }
+  #toolbar button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .bk { position:relative; }
+  .bk .acts { display:none; position:absolute; top:6px; right:6px; gap:4px; }
+  body.manage .bk .acts { display:flex; }
+  body.manage .bk { cursor:default; }
+  .bk .acts button { border:none; border-radius:6px; padding:3px 8px; font-size:11px; cursor:pointer; background:rgba(255,255,255,.92); box-shadow:0 1px 4px rgba(0,0,0,.18); }
+  .bk .acts .del { color:#c0392b; }
+  .bk .acts .cvbtn { color:var(--accent); }
+  .bk .acts .mv { color:#7a5ea8; }
+  #bkSubtabs { display:flex; gap:4px; margin:6px 0 2px; }
+  #bkSubtabs button { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:5px 14px; font-size:12px; cursor:pointer; color:var(--muted); }
+  #bkSubtabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:50; }
+  .modal .box { background:var(--card); border-radius:12px; padding:20px; max-width:720px; width:92%; max-height:80vh; overflow:auto; }
+  .modal h3 { margin:0 0 12px; font-size:15px; }
+  .modal .close { float:right; border:none; background:none; font-size:18px; cursor:pointer; color:var(--muted); }
+  #cands { display:flex; gap:12px; flex-wrap:wrap; }
+  .cand { width:130px; text-align:center; cursor:pointer; border:1px solid var(--border); border-radius:8px; padding:8px; font-size:11px; }
+  .cand:hover { border-color:var(--accent); box-shadow:0 2px 8px rgba(0,0,0,.12); }
+  .cand img { width:100%; height:170px; object-fit:contain; background:#eee; border-radius:4px; }
+  #trashList .ti { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border); font-size:13px; }
+  #trashList .ti button { border:none; background:var(--accent); color:#fff; border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; }
+  #trashList .ti .meta { color:var(--muted); font-size:11px; }
+  /* 顶部板块 tab */
+  #tabs { display:flex; gap:6px; margin:14px 0 4px; border-bottom:1px solid var(--border); }
+  #tabs button { background:none; border:none; padding:9px 16px; font-size:14px; cursor:pointer; color:var(--muted); border-bottom:2px solid transparent; margin-bottom:-1px; font-weight:600; }
+  #tabs button.on { color:var(--accent); border-bottom-color:var(--accent); }
+  .view { display:none; }
+  .view.on { display:block; }
+  /* 微信读书 */
+  .wrmsg { padding:24px 0; color:var(--muted); font-size:13px; line-height:1.7; }
+  .wrmsg input { display:block; margin-top:8px; padding:7px 12px; border:1px solid var(--border); border-radius:8px; font-size:13px; width:320px; max-width:90%; }
+  .wrmsg button { margin-top:10px; background:var(--accent); color:#fff; border:none; border-radius:8px; padding:7px 16px; cursor:pointer; font-size:13px; }
+  .wrgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:14px; margin-top:16px; }
+  .wr { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:8px; }
+  .wr .cv { height:140px; border-radius:6px; background:#eceae5; overflow:hidden; display:flex; align-items:center; justify-content:center; color:#a09c94; }
+  .wr .cv img { width:100%; height:100%; object-fit:cover; }
+  .wr .tt { font-size:12px; font-weight:600; line-height:1.3; margin-top:6px; max-height:2.6em; overflow:hidden; }
+  .wr .au { font-size:10px; color:var(--muted); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .wr .pr { height:4px; background:#eee; border-radius:2px; margin-top:6px; }
+  .wr .pr i { display:block; height:100%; background:var(--accent); border-radius:2px; }
+  .wr .pp { font-size:10px; color:var(--accent); margin-top:2px; text-align:right; }
+  /* 阅读报告 */
+  #reportView h2 { font-size:15px; margin:18px 0 8px; }
+  .rcards { display:flex; gap:12px; flex-wrap:wrap; }
+  .rcard { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 18px; min-width:130px; }
+  .rcard .n { font-size:22px; font-weight:700; color:var(--accent); }
+  .rcard .l { font-size:11px; color:var(--muted); margin-top:3px; }
+  .rbar { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:12px; }
+  .rbar .nm { width:170px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .rbar .bar { flex:1; height:10px; background:#efede8; border-radius:5px; overflow:hidden; }
+  .rbar .bar i { display:block; height:100%; background:var(--accent); }
+  /* 微信读书子 tab + 书墙 + 笔记弹窗 */
+  .subtabs { display:flex; gap:4px; margin-top:10px; }
+  .subtabs button { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:6px 14px; font-size:12px; cursor:pointer; color:var(--muted); }
+  .subtabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .wallmonth { margin-top:16px; }
+  .wallmonth h3 { font-size:13px; color:var(--accent); margin:10px 0 6px; }
+  .wallgrid { display:flex; flex-wrap:wrap; gap:6px; }
+  .wallgrid img { width:52px; height:72px; object-fit:cover; border-radius:4px; background:#eceae5; }
+  .wr .cv { cursor:pointer; }
+  #noteList .ni { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:10px 12px; margin:8px 0; font-size:13px; line-height:1.6; }
+  #noteList .ni .ch { font-size:11px; color:var(--muted); margin-bottom:4px; }
+  #noteList .ni .ai { margin-top:8px; padding:10px; background:#f4f2ec; border-radius:6px; font-size:12px; white-space:pre-wrap; }
+  .mini { background:none; border:1px solid var(--accent); color:var(--accent); border-radius:6px; padding:4px 10px; cursor:pointer; font-size:12px; margin-top:6px; }
+  /* 本地跟踪 */
+  .lsec { margin-top:16px; padding-top:12px; border-top:1px solid var(--border); }
+  .hmgrid { display:flex; flex-wrap:wrap; gap:3px; max-width:640px; }
+  .hmcell { width:14px; height:14px; border-radius:3px; background:#efede8; }
+  .hmlegend { font-size:11px; color:var(--muted); margin-top:6px; }
+
+</style>
+</head>
+<body>
+<div id="shelf">
+  <h1>阅览围读 · Hermes 版</h1>
+  <div class="sub" id="count">加载书库…</div>
+  <div class="subtabs" id="bkSubtabs">
+    <button data-sub="main" class="on">📖 书库</button>
+    <button data-sub="misc">🧺 杂书架</button>
+    <button data-sub="adult">🔞 18+</button>
+  </div>
+  <div id="tabs">
+    <button data-tab="local" class="on">📚 本地书库</button>
+    <button data-tab="weread">📕 微信读书</button>
+    <button data-tab="report">📈 阅读报告</button>
+    <button data-tab="ext" id="extBtn" title="用系统默认浏览器打开书库（可全屏阅读）">🌐 外部阅读</button>
+  </div>
+  <div class="view on" id="localView">
+  <input id="search" placeholder="搜书名 / 作者，回车清空">
+  <div id="toolbar">
+    <button id="manageBtn">🗑 管理模式</button>
+    <button id="rescanBtn">↻ 重新扫描书库</button>
+    <button id="trashBtn">♻ 回收站</button>
+    <button id="coverAllBtn">🖼 无封面批量匹配</button>
+  </div>
+  <div id="grid"></div>
+  </div>
+  <div class="view" id="wereadView">
+    <div class="subtabs" id="wrSubtabs">
+      <button data-sub="shelf" class="on">书架</button>
+      <button data-sub="notes">笔记回顾</button>
+      <button data-sub="wall">年度书墙</button>
+    </div>
+    <div id="wrBody" class="wrmsg">加载微信读书书架…</div>
+    <div class="wrgrid" id="wrGrid"></div>
+    <div id="wrExtra"></div>
+  </div>
+  <div class="view" id="reportView">
+    <div id="rpBody" class="wrmsg">加载阅读统计…</div>
+    <div id="rpContent"></div>
+  </div>
+</div>
+
+<div class="modal" id="noteModal"><div class="box">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <b id="noteTitle"></b><button onclick="closeModal('noteModal')">✕ 关闭</button>
+  </div>
+  <div id="noteList"></div>
+</div></div>
+
+<div class="modal" id="coverModal"><div class="box">
+  <button class="close" onclick="document.getElementById('coverModal').style.display='none'">✕</button>
+  <h3 id="coverTitle">选择封面</h3>
+  <div id="coverMsg" style="color:var(--muted);font-size:12px;margin-bottom:10px;"></div>
+  <div id="cands"></div>
+</div></div>
+
+<div class="modal" id="trashModal"><div class="box">
+  <button class="close" onclick="document.getElementById('trashModal').style.display='none'">✕</button>
+  <h3>♻ 回收站（可恢复）</h3>
+  <div id="trashList"></div>
+</div></div>
+
+<div id="reader">
+  <div id="bar">
+    <button id="back">← 书架</button>
+    <button id="tocbtn">目录</button>
+    <div class="tt" id="rtitle"></div>
+    <button id="spreadBtn" title="切换单页 / 双页">▤ 双页</button>
+    <button id="prev">‹</button>
+    <button id="next">›</button>
+    <div class="pg" id="pg"></div>
+  </div>
+  <div id="stage"></div>
+  <div id="toc"></div>
+  <div id="err"></div>
+</div>
+
+<script type="module">
+import { View, makeBook } from '/foliate/view.js';
+
+const $ = s => document.querySelector(s);
+let books = [];
+let bkShelf = localStorage.getItem('qmu-bksub') || 'main';
+document.querySelectorAll('#bkSubtabs button').forEach(btn => {
+  btn.onclick = () => loadShelf(btn.dataset.sub);
+});
+async function moveShelf(b, target) {
+  const r = await fetch('/api/shelf', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: b.id, shelf: target }) });
+  const d = await r.json();
+  if (!d.ok) return showErr('移动失败：' + (d.error || '?'));
+  loadShelf();
+}
+let view = null;
+
+function showErr(msg) { const e = $('#err'); e.style.display = 'flex'; e.textContent = msg; }
+
+async function loadShelf(shelf) {
+  bkShelf = shelf || bkShelf || localStorage.getItem('qmu-bksub') || 'main';
+  localStorage.setItem('qmu-bksub', bkShelf);
+  document.querySelectorAll('#bkSubtabs button').forEach(b => b.classList.toggle('on', b.dataset.sub === bkShelf));
+  const r = await fetch('/api/books?shelf=' + bkShelf);
+  const d = await r.json();
+  books = d.books;
+  const names = { main: '书库', misc: '杂书架', adult: '18+' };
+  $('#count').textContent = `${names[bkShelf]} ${d.count} 本 / 全库 ${d.total} 本 · 书库 F:\\Users\\Calibre 书库（删入回收站可恢复）`;
+  renderGrid(books);
+}
+
+function renderGrid(list) {
+  const grid = $('#grid');
+  grid.innerHTML = '';
+  for (const b of list) {
+    const el = document.createElement('div');
+    el.className = 'bk';
+    el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="/cover/${b.id}">` : `<div class="ph">${(b.title[0] || '书')}</div>`}</div>
+      <div class="tt">${esc(b.title)}</div>
+      <div class="au">${esc(b.author || '')}</div>
+      <span class="fm">${b.format}</span>
+      <div class="acts">
+        ${['main','misc','adult'].filter(s => s !== b.shelf).map(s =>
+          `<button class="mv" data-act="shelf:${s}">${{main:'📚', misc:'🧺', adult:'🔞'}[s]}</button>`).join('')}
+        ${b.cover ? '' : `<button class="cvbtn" data-act="cover">🖼 封面</button>`}
+        <button class="del" data-act="del">✕ 删</button>
+      </div>`;
+    el.onclick = (ev) => {
+      const act = ev.target?.dataset?.act;
+      if (act === 'cover') return pickCover(b);
+      if (act === 'del') return delBook(b);
+      if (act?.startsWith('shelf:')) return moveShelf(b, act.slice(6));
+      openBook(b);
+    };
+    grid.appendChild(el);
+  }
+}
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ---- 板块切换：本地书库 / 微信读书 / 阅读报告 ---- */
+document.querySelectorAll('#tabs button').forEach(btn => {
+  btn.onclick = () => {
+    if (btn.dataset.tab === 'ext') {
+      // 跳出桌面插件 iframe：用系统默认浏览器全窗口打开书库
+      fetch('/api/open-browser', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => { if (!d.ok) alert('打开失败：' + (d.error || '?')); })
+        .catch(e => alert('打开失败：' + e));
+      return; // 动作按钮，不切换板块
+    }
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b === btn));
+    document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === btn.dataset.tab + 'View'));
+    if (btn.dataset.tab === 'weread') setWrSub(wrSub);
+    if (btn.dataset.tab === 'report') loadReport();
+  };
+});
+
+/* ---- 微信读书子 tab：书架 / 笔记回顾 / 年度书墙 ---- */
+let wrSub = localStorage.getItem('qmu-wrsub') || 'shelf';
+document.querySelectorAll('#wrSubtabs button').forEach(btn => {
+  btn.onclick = () => {
+    wrSub = btn.dataset.sub;
+    localStorage.setItem('qmu-wrsub', wrSub);
+    document.querySelectorAll('#wrSubtabs button').forEach(b => b.classList.toggle('on', b === btn));
+    $('#wrExtra').innerHTML = '';
+    if (wrSub === 'shelf') loadWeread();
+    if (wrSub === 'notes') loadWrNotes();
+    if (wrSub === 'wall') loadWrWall();
+  };
+});
+function setWrSub(sub) {
+  const btn = document.querySelector(`#wrSubtabs [data-sub="${sub}"]`);
+  if (btn) btn.onclick();
+}
+
+async function loadWrNotes() {
+  wrMsg('加载笔记数据…');
+  $('#wrGrid').innerHTML = '';
+  try {
+    const r = await fetch('/api/weread/notebooks');
+    const d = await r.json();
+    if (!d.ok) { wrMsg('笔记数据加载失败：' + esc(d.error || '?')); return; }
+    $('#wrBody').style.display = 'none';
+    const grid = $('#wrGrid');
+    grid.innerHTML = '';
+    if (!d.count) { grid.innerHTML = '<div class="wrmsg">笔记接口暂无书籍。</div>'; return; }
+    for (const b of d.books) {
+      const el = document.createElement('div');
+      el.className = 'wr';
+      el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="${esc(b.cover)}">` : '📖'}</div>
+        <div class="tt">${esc(b.title)}</div>
+        <div class="au">${esc(b.author || '')}</div>
+        <div class="pp">✍${b.noteCount} · 💭${b.reviewCount}</div>`;
+      el.querySelector('.cv').onclick = () => openNotes(b);
+      grid.appendChild(el);
+    }
+  } catch (e) { wrMsg('笔记数据加载失败：' + esc(String(e))); }
+}
+
+async function openNotes(b) {
+  $('#noteTitle').textContent = b.title + '（✍' + b.noteCount + ' 💭' + b.reviewCount + '）';
+  $('#noteList').innerHTML = '<div class="wrmsg">加载划线笔记…</div>';
+  $('#noteModal').style.display = 'flex';
+  try {
+    const r = await fetch('/api/weread/notes/' + b.bookId);
+    const d = await r.json();
+    if (!d.ok) { $('#noteList').innerHTML = '<div class="wrmsg">' + esc(d.error || '加载失败') + '</div>'; return; }
+    $('#noteList').innerHTML = d.items.length ? '' : '<div class="wrmsg">这本书还没有划线笔记。</div>';
+    d.items.forEach((n, i) => {
+      const el = document.createElement('div');
+      el.className = 'ni';
+      el.innerHTML = `<div class="ch">${n.type === 'review' ? '💭 想法' : '✍ 划线'} · ${esc(n.chapter)} · ${n.time ? new Date(n.time * 1000).toLocaleDateString() : ''}</div>
+        <div>${esc(n.text)}</div>
+        ${i === 0 ? '<button class="mini" id="aiBtn">🤖 AI 总结这本书</button><div class="ai" id="aiBox" style="display:none"></div>' : ''}`;
+      $('#noteList').appendChild(el);
+    });
+    const btn = document.getElementById('aiBtn');
+    if (btn) btn.onclick = async () => {
+      btn.disabled = true; btn.textContent = '🤖 总结中…（约 30 秒）';
+      const box = document.getElementById('aiBox');
+      box.style.display = 'block';
+      try {
+        const r2 = await fetch('/api/ai/summary', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: b.bookId, title: b.title, highlights: d.items }) });
+        const d2 = await r2.json();
+        box.textContent = d2.ok ? d2.summary : (d2.error || 'AI 调用失败');
+      } catch (e) { box.textContent = 'AI 调用失败：' + e; }
+      btn.style.display = 'none';
+    };
+  } catch (e) { $('#noteList').innerHTML = '<div class="wrmsg">加载失败：' + esc(String(e)) + '</div>'; }
+}
+
+async function loadWrWall(year) {
+  wrMsg('加载年度书墙…');
+  $('#wrGrid').innerHTML = '';
+  try {
+    const r = await fetch('/api/weread/bookwall');
+    const d = await r.json();
+    if (!d.ok) { wrMsg('书墙加载失败：' + esc(d.error || '?')); return; }
+    $('#wrBody').style.display = 'none';
+    const years = Object.keys(d.wall);
+    const y = year || years[0];
+    if (!y) { $('#wrExtra').innerHTML = '<div class="wrmsg">书墙暂无阅读记录时间。</div>'; return; }
+    let html = `<div class="subtabs">${years.map(yy => `<button onclick="loadWrWall('${yy}')" class="${yy === y ? 'on' : ''}">${yy}</button>`).join('')}</div>`;
+    const mm = d.wall[y] || {};
+    const months = Object.keys(mm).sort((a, b) => b - a);
+    for (const m of months) {
+      html += `<div class="wallmonth"><h3>${m} 月 · ${mm[m].length} 本</h3><div class="wallgrid">` +
+        mm[m].map(b => b.cover ? `<img loading="lazy" src="${esc(b.cover)}" title="${esc(b.title)}">` : `<span class="hmcell" title="${esc(b.title)}"></span>`).join('') +
+        `</div></div>`;
+    }
+    $('#wrExtra').innerHTML = html;
+  } catch (e) { wrMsg('书墙加载失败：' + esc(String(e))); }
+}
+
+function wrMsg(html) { $('#wrBody').innerHTML = html; $('#wrBody').style.display = 'block'; $('#wrGrid').innerHTML = ''; $('#wrExtra').innerHTML = ''; }
+function rpMsg(html) { $('#rpBody').innerHTML = html; $('#rpBody').style.display = 'block'; $('#rpContent').innerHTML = ''; }
+
+async function loadWeread() {
+  try {
+    const r = await fetch('/api/weread/shelf');
+    const d = await r.json();
+    if (!d.ok) {
+      if (d.code === 'weread/no-key' || d.code === 'weread/unauthorized') {
+        wrMsg(`未配置或无效的微信读书 API Key。<br>
+          1. 浏览器登录微信读书后访问 <a href="https://weread.qq.com/api/skills/apikeyGet" target="_blank">weread.qq.com/api/skills/apikeyGet</a> 复制 apikey<br>
+          2. 粘贴到下面并保存：<input id="wrKey" placeholder="wrk-xxxxxxxx"><br>
+          <button id="wrSave">保存并加载书架</button>${d.error && d.code !== 'weread/no-key' ? '<br><span style="color:#c0392b">' + esc(d.error) + '</span>' : ''}`);
+        $('#wrSave').onclick = async () => {
+          const k = $('#wrKey').value.trim();
+          if (!k) return alert('请先粘贴 apikey');
+          await fetch('/api/weread/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apiKey: k }) });
+          loadWeread();
+        };
+      } else {
+        wrMsg('微信读书加载失败：' + esc(d.error || '?'));
+      }
+      return;
+    }
+    $('#wrBody').style.display = 'none';
+    $('#wrExtra').innerHTML = '';
+    const grid = $('#wrGrid');
+    grid.innerHTML = '';
+    for (const b of d.books) {
+      const el = document.createElement('div');
+      el.className = 'wr';
+      el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="${esc(b.cover)}">` : esc(b.title[0] || '书')}</div>
+        <div class="tt">${esc(b.title)}</div>
+        <div class="au">${esc(b.author || '')}</div>
+        <div class="pr"><i style="width:${b.progress}%"></i></div>
+        <div class="pp">${b.progress ? b.progress + '%' : ''}${b.noteCount ? ' · ✍' + b.noteCount : ''}</div>`;
+      el.querySelector('.cv').onclick = () => {
+        if (b.readerLink || b.deepLink) window.open(b.readerLink || b.deepLink, '_blank');
+      };
+      grid.appendChild(el);
+    }
+  } catch (e) { wrMsg('微信读书加载失败：' + esc(String(e))); }
+}
+
+function fmtMin(sec) { return sec >= 3600 ? (sec/3600).toFixed(1) + ' 小时' : Math.round(sec/60) + ' 分钟'; }
+
+async function loadReport() {
+  try {
+    const r = await fetch('/api/weread/stats?mode=overall');
+    const d = await r.json();
+    if (!d.ok) { rpMsg('阅读统计加载失败：' + esc(d.error || '?')); return; }
+    const s = d.stats || {};
+    const rc = (n, l) => `<div class="rcard"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+    const bars = (list, nmf, vf) => {
+      const max = Math.max(...list.map(vf), 1);
+      return list.map(v => `<div class="rbar"><div class="nm">${esc(nmf(v))}</div>
+        <div class="bar"><i style="width:${(vf(v)/max*100).toFixed(0)}%"></i></div>
+        <div class="v">${fmtMin(vf(v))}</div></div>`).join('');
+    };
+    let html = `<h2>今日</h2><div class="rcards" id="todayCards"></div>
+      <h2>累计阅读</h2><div class="rcards">
+      ${rc(fmtMin(s.totalReadTime || 0), '微信读书 · 总时长')}
+      ${rc(s.readDays || 0, '微信读书 · 天数')}
+      ${rc(Math.max(0, Math.round((s.totalReadTime || 0) / Math.max(s.readDays || 1, 1) / 60)) + ' 分钟', '日均时长')}
+      ${rc((new Date((s.registTime || 0) * 1000)).getFullYear(), '注册年份')}</div>`;
+    // 今日卡片：微信读书 + 本地
+    try {
+      const [tr, lr] = await Promise.all([
+        fetch('/api/weread/today').then(r => r.json()).catch(() => null),
+        fetch('/api/track').then(r => r.json()).catch(() => null),
+      ]);
+      let tc = '';
+      if (tr && tr.ok) tc += rc(fmtMin(tr.todaySec || 0), '今日 · 微信读书');
+      if (lr && lr.ok) tc += rc(fmtMin(lr.todaySec || 0), '今日 · 本地书库');
+      if (lr && lr.ok) tc += rc(lr.bookCount || 0, '本地 · 已读书目');
+      if (lr && lr.ok) tc += rc(lr.dayCount || 0, '本地 · 记录天数');
+      const tel = document.getElementById('todayCards');
+      if (tel) tel.innerHTML = tc || rc('0', '今日尚未阅读');
+    } catch (e) {}
+    // 微信年度热力图
+    const hmYear = (new Date()).getFullYear();
+    try {
+      const hr = await fetch('/api/weread/heatmap/' + hmYear);
+      const hd = await hr.json();
+      if (hd.ok) {
+        const daily = hd.daily || {};
+        const max = Math.max(...Object.values(daily), 1);
+        const start = new Date(hmYear, 0, 1);
+        let cells = '';
+        for (let d2 = new Date(start); d2.getFullYear() === hmYear; d2.setDate(d2.getDate() + 1)) {
+          const key = String(Math.floor(new Date(d2.getFullYear(), d2.getMonth(), d2.getDate()).getTime() / 1000));
+          const v = daily[key] || 0;
+          const lv = v === 0 ? 0 : Math.min(4, Math.ceil(v / max * 4));
+          const c = ['#efede8', '#cfe3cf', '#a5d0a5', '#6fb96f', '#3d9b3d'][lv];
+          cells += `<div class="hmcell" style="background:${c}" title="${d2.toISOString().slice(0, 10)} ${fmtMin(v)}"></div>`;
+        }
+        html += `<h2>微信读书 ${hmYear} 年度热力图</h2><div class="hmgrid">${cells}</div>
+          <div class="hmlegend">越绿读得越多 · 数据来自微信读书 API（近几个月 API 窗口限制，可能不完整）</div>`;
+      }
+    } catch (e) {}
+    const rs = s.readStat || [];
+    if (rs.length) html += `<div class="rcards" style="margin-top:10px;">` +
+      rs.map(x => rc(x.counts, x.stat)).join('') + `</div>`;
+    const longest = (s.readLongest || []).filter(x => x.book && x.book.title).slice(0, 8);
+    if (longest.length) html += `<h2>读得最多的书</h2>` + bars(longest, v => v.book.title, v => v.readTime);
+    const cats = (s.preferCategory || []).slice(0, 8);
+    if (cats.length) html += `<h2>偏好分类</h2>` + bars(cats, v => (v.parentCategoryTitle ? v.parentCategoryTitle + ' · ' : '') + v.categoryTitle, v => v.readingTime);
+    const times = s.preferTime || [];
+    if (times.length === 24) {
+      const max = Math.max(...times, 1);
+      html += `<h2>24 小时阅读时段（微信读书）</h2><div style="display:flex;gap:3px;align-items:flex-end;height:90px;max-width:560px;">` +
+        times.map((v, h) => `<div style="flex:1;text-align:center;"><div style="height:${(v/max*80).toFixed(0)}px;background:var(--accent);border-radius:2px 2px 0 0;"></div><div style="font-size:9px;color:var(--muted);">${h}</div></div>`).join('') + `</div>`;
+    }
+    // 本地书库跟踪
+    try {
+      const lr = await fetch('/api/track').then(r => r.json());
+      if (lr.ok) {
+        let lh = `<div class="lsec"><h2>本地书库阅读跟踪</h2><div class="rcards">
+          ${rc(fmtMin(lr.totalSec || 0), '本地 · 总时长')}
+          ${rc(lr.dayCount || 0, '本地 · 记录天数')}
+          ${rc(lr.bookCount || 0, '本地 · 书目数')}</div>`;
+        const tops = (lr.topBooks || []).filter(b => b.seconds > 0);
+        if (tops.length) {
+          const max = Math.max(...tops.map(b => b.seconds), 1);
+          lh += tops.map(b => `<div class="rbar"><div class="nm">${esc(b.title)}</div>
+            <div class="bar"><i style="width:${(b.seconds/max*100).toFixed(0)}%"></i></div>
+            <div class="v">${fmtMin(b.seconds)} · ${b.lastPercent}%</div></div>`).join('');
+        } else {
+          lh += `<div class="wrmsg">打开任意本地书籍阅读 15 秒后，这里会出现记录。</div>`;
+        }
+        // 本地每日热力
+        const days = lr.days || {};
+        if (Object.keys(days).length) {
+          const max = Math.max(...Object.values(days), 1);
+          lh += `<h2>本地每日时长</h2><div style="display:flex;gap:3px;align-items:flex-end;height:70px;max-width:560px;">` +
+            Object.entries(days).map(([d, v]) => `<div style="flex:1;text-align:center;" title="${d} ${fmtMin(v)}"><div style="height:${(v/max*60).toFixed(0)}px;background:var(--accent);border-radius:2px 2px 0 0;"></div><div style="font-size:9px;color:var(--muted);">${d.slice(5)}</div></div>`).join('') + `</div>`;
+        }
+        lh += `</div>`;
+        html += lh;
+      }
+    } catch (e) {}
+    $('#rpBody').style.display = 'none';
+    $('#rpContent').innerHTML = html;
+  } catch (e) { rpMsg('阅读统计加载失败：' + esc(String(e))); }
+}
+
+/* ---- 本地阅读跟踪：阅读器打开时每 15 秒上报一次 ---- */
+let trackTimer = null, trackSeconds = 0, trackMeta = null;
+function startTracking(book) {
+  stopTracking();
+  trackMeta = book;
+  trackSeconds = 0;
+  trackTimer = setInterval(() => {
+    trackSeconds += 15;
+    fetch('/api/track', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bookId: 'local-' + book.id, title: book.title,
+        delta: 15, percent: Math.round((book.lastProgress || 0) * 100) }) }).catch(() => {});
+  }, 15000);
+}
+function stopTracking() {
+  if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
+}
+// 年度切换按钮用 inline onclick，需暴露到全局
+window.loadWrWall = loadWrWall;
+window.closeModal = id => { document.getElementById(id).style.display = 'none'; };
+
+
+$('#manageBtn').onclick = () => {
+  document.body.classList.toggle('manage');
+  $('#manageBtn').classList.toggle('on');
+};
+
+$('#rescanBtn').onclick = async () => {
+  $('#rescanBtn').textContent = '↻ 扫描中…';
+  const r = await fetch('/api/rescan', { method: 'POST' });
+  const d = await r.json();
+  $('#rescanBtn').textContent = '↻ 重新扫描书库';
+  loadShelf();
+};
+
+$('#trashBtn').onclick = async () => {
+  const r = await fetch('/api/manage/trash');
+  const d = await r.json();
+  const box = $('#trashList');
+  const head = d.items.length
+    ? `<div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+         <button id="purgeAll" style="color:#c0392b;">🗑 清空回收站</button></div>`
+    : '';
+  box.innerHTML = d.items.length ? head
+    : '<div style="color:var(--muted);font-size:13px;">回收站是空的</div>';
+  for (const it of d.items) {
+    const row = document.createElement('div');
+    row.className = 'ti';
+    row.innerHTML = `<div style="flex:1;"><div>${esc(it.title || it.key)}</div>
+      <div class="meta">${esc(it.orig)} · 删除于 ${esc(it.deleted_at)}</div></div>
+      <button data-key="${esc(it.key)}">恢复</button>
+      <button class="pg1" data-key="${esc(it.key)}" title="彻底删除（不可恢复）" style="color:#c0392b;">✕ 删</button>`;
+    const [rbtn, pbtn] = row.querySelectorAll('button');
+    rbtn.onclick = async () => {
+      const rr = await fetch('/api/manage/restore/' + encodeURIComponent(it.key), { method: 'POST' });
+      const dd = await rr.json();
+      if (dd.ok) { row.remove(); loadShelf(); }
+      else alert('恢复失败: ' + dd.error);
+    };
+    pbtn.onclick = async () => {
+      if (!confirm(`彻底删除「${it.title}」？文件将从磁盘清除，不可恢复！`)) return;
+      const typed = prompt(`再次确认：请输入书名「${it.title}」以彻底删除`);
+      if (typed !== it.title) return alert('输入不一致，已取消');
+      const rr = await fetch('/api/manage/purge/' + encodeURIComponent(it.key),
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: it.title }) });
+      const dd = await rr.json();
+      if (dd.ok) { row.remove(); loadShelf(); }
+      else alert('删除失败: ' + (dd.error || (dd.failed || []).map(f => f.error).join('; ')));
+    };
+    box.appendChild(row);
+  }
+  const pa = document.getElementById('purgeAll');
+  if (pa) pa.onclick = async () => {
+    if (!confirm(`清空回收站共 ${d.items.length} 项？所有文件将从磁盘彻底删除，不可恢复！`)) return;
+    const typed = prompt('再次确认：请输入「清空回收站」以继续');
+    if (typed !== '清空回收站') return alert('输入不一致，已取消');
+    const rr = await fetch('/api/manage/purge',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: '清空回收站' }) });
+    const dd = await rr.json();
+    if (dd.ok) { $('#trashBtn').click(); loadShelf(); }
+    else alert('清空失败: ' + (dd.error || (dd.failed || []).map(f => f.error).join('; ')));
+  };
+  $('#trashModal').style.display = 'flex';
+};
+
+async function pickCover(b) {
+  $('#coverModal').style.display = 'flex';
+  $('#coverTitle').textContent = '选择封面 — ' + b.title;
+  $('#coverMsg').textContent = '搜索豆瓣…';
+  $('#cands').innerHTML = '';
+  const r = await fetch('/api/covers/search/' + b.id);
+  const d = await r.json();
+  $('#coverMsg').textContent = d.ok ? `关键词「${d.query}」→ ${d.candidates.length} 个候选，点击应用` : ('搜索失败: ' + d.error);
+  for (const c of d.candidates || []) {
+    const el = document.createElement('div');
+    el.className = 'cand';
+    el.innerHTML = `<img src="${esc(c.url)}" loading="lazy"><div style="margin-top:5px;">${esc(c.title)}</div>
+      <div style="color:var(--muted);">${esc(c.author || '')} ${esc(c.year || '')}</div>`;
+    el.onclick = async () => {
+      el.style.opacity = '.4';
+      const rr = await fetch('/api/covers/apply/' + b.id, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: c.url })
+      });
+      const dd = await rr.json();
+      if (dd.ok) { $('#coverModal').style.display = 'none'; loadShelf(); }
+      else { el.style.opacity = '1'; alert('应用失败: ' + dd.error); }
+    };
+    $('#cands').appendChild(el);
+  }
+}
+
+$('#coverAllBtn').onclick = async () => {
+  if (!confirm('对全部无封面书籍批量搜索豆瓣封面？每本自动采用第一个候选（可逐本重选覆盖）。继续？')) return;
+  $('#coverAllBtn').textContent = '⏳ 匹配中…';
+  const noCover = books.filter(b => !b.cover);
+  let ok = 0, fail = 0;
+  for (const b of noCover) {
+    try {
+      const s = await fetch('/api/covers/search/' + b.id);
+      const sd = await s.json();
+      const c = sd.candidates?.[0];
+      if (!c) { fail++; continue; }
+      const a = await fetch('/api/covers/apply/' + b.id, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: c.url })
+      });
+      (await a.json()).ok ? ok++ : fail++;
+    } catch { fail++; }
+  }
+  $('#coverAllBtn').textContent = '🖼 无封面批量匹配';
+  alert(`批量匹配完成：成功 ${ok}，失败 ${fail}（失败可单独重试）`);
+  loadShelf();
+};
+
+async function delBook(b) {
+  if (!confirm(`删除《${b.title}》？\n文件移入书库 _trash 回收站，可随时恢复，不直接删除。`)) return;
+  const r = await fetch('/api/manage/delete/' + b.id, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm: b.title })
+  });
+  const d = await r.json();
+  if (d.ok) loadShelf();
+  else alert('删除失败: ' + d.error);
+}
+
+$('#search').addEventListener('input', e => {
+  const q = e.target.value.trim().toLowerCase();
+  if (!q) return renderGrid(books);
+  renderGrid(books.filter(b => (b.title + ' ' + b.author).toLowerCase().includes(q)));
+});
+
+function fmtSize(n) { return n > 1048576 ? (n/1048576).toFixed(1)+' MB' : (n/1024).toFixed(0)+' KB'; }
+
+/* ---- codex 淡雅白主题 + 单/双页 ---- */
+let spreadMode = localStorage.getItem('qmu-spread') || 'single';
+const READER_CSS = `html,body{background:#faf9f7 !important;color:#1c1c1a !important;}
+body *{color:#1c1c1a !important}
+h1,h2,h3,h4,h5,h6,p,span,li,td,th,blockquote{color:#1c1c1a !important}
+a{color:#3a7d6d !important}`;
+
+let wheelLock = 0;
+function onNavWheel(e) {
+  if ($('#reader').style.display !== 'flex') return;
+  if (e.target?.closest?.('#toc, .modal')) return;
+  e.preventDefault();
+  const now = Date.now();
+  if (now - wheelLock < 300) return;
+  if (Math.abs(e.deltaY) < 10 && Math.abs(e.deltaX) < 10) return;
+  wheelLock = now;
+  if (e.deltaY > 0 || e.deltaX > 0) view?.next(); else view?.prev();
+}
+function onNavKey(e) {
+  if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') { e.preventDefault(); view?.next(); }
+  else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); view?.prev(); }
+}
+// 章节 iframe 文档：滚轮 + 键盘翻页（iframe 内事件不会冒泡到外层，须逐章挂）
+function attachNavHandlers(doc) {
+  if (!doc || doc.__qmuNav) return;
+  doc.__qmuNav = true;
+  doc.addEventListener('wheel', onNavWheel, { passive: false });
+  doc.addEventListener('keydown', onNavKey);
+}
+
+function applyTheme() {
+  for (const { doc } of view?.renderer?.getContents?.() || []) {
+    attachNavHandlers(doc);
+    if (!doc || doc.getElementById('qmu-light')) continue;
+    const st = doc.createElement('style');
+    st.id = 'qmu-light';
+    st.textContent = READER_CSS;
+    doc.head.appendChild(st);
+  }
+}
+
+function applySpread() {
+  const r = view?.renderer;
+  if (!r) return;
+  r.setAttribute('max-column-count', spreadMode === 'double' ? '2' : '1');
+  r.setAttribute('flow', 'paged');
+  $('#spreadBtn').textContent = spreadMode === 'double' ? '▤ 双页' : '▢ 单页';
+  $('#spreadBtn').classList.toggle('on', spreadMode === 'double');
+  $('#stage foliate-view')?.classList.toggle('spread', spreadMode === 'double');
+}
+
+$('#spreadBtn').onclick = () => {
+  spreadMode = spreadMode === 'double' ? 'single' : 'double';
+  localStorage.setItem('qmu-spread', spreadMode);
+  applySpread();
+};
+
+
+async function openBook(b) {
+  $('#shelf').style.display = 'none';
+  const rd = $('#reader'); rd.style.display = 'flex';
+  $('#err').style.display = 'none';
+  $('#rtitle').textContent = b.title;
+  $('#toc').style.display = 'none';
+  $('#pg').textContent = '';
+  const stage = $('#stage');
+  stage.innerHTML = '';
+
+  if (b.format === 'pdf') {
+    const ifr = document.createElement('iframe');
+    ifr.className = 'pdfview';
+    ifr.src = `/file/${b.id}`;
+    stage.appendChild(ifr);
+    $('#pg').textContent = fmtSize(b.size);
+    return;
+  }
+
+  try {
+    const resp = await fetch(`/file/${b.id}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    // foliate makeBook 需要 File.name 判断格式
+    const file = new File([blob], `book.${b.format}`, { type: blob.type });
+    view = new View(stage);
+    stage.appendChild(view); // foliate View 必须挂进 DOM，否则 open() 挂起
+    view.addEventListener('relocate', e => {
+      const frac = e.detail.fraction;
+      if (frac != null) $('#pg').textContent = (frac * 100).toFixed(1) + '%';
+      if (b._trackPct == null) b._trackPct = frac;
+      b._trackPct = frac;
+      if (trackMeta) trackMeta.lastProgress = frac;
+    });
+    view.addEventListener('load', e => {
+      // TOC
+      const toc = e.detail.toc;
+      const box = $('#toc');
+      box.innerHTML = '';
+      const walk = (items, depth) => {
+        for (const it of items || []) {
+          const a = document.createElement('a');
+          a.textContent = '\u3000'.repeat(depth) + (it.label?.trim() || '(无标题)');
+          a.onclick = () => { view.goTo(it.href); box.style.display = 'none'; };
+          box.appendChild(a);
+          walk(it.subitems, depth + 1);
+        }
+      };
+      walk(toc, 0);
+    });
+    const book = await makeBook(file);
+    await view.open(book);
+    const pos = localStorage.getItem('qmu-pos-' + b.id);
+    if (pos) { try { await view.goTo(pos); } catch { /* 位置失效忽略 */ } }
+    applySpread();
+    applyTheme();
+    startTracking({ id: b.id, title: b.title, lastProgress: b._trackPct || 0 });
+    view.addEventListener('relocate', () => applyTheme());
+    view.addEventListener('relocate', e => {
+      if (e.detail.cfi) localStorage.setItem('qmu-pos-' + b.id, e.detail.cfi);
+    });
+  } catch (err) {
+    stage.innerHTML = '';
+    showErr(`打开失败（${b.format}）：${err.message}。该格式暂不支持在线阅读，可回 Calibre 转格式。`);
+  }
+}
+
+$('#back').onclick = () => {
+  stopTracking();
+  try { view?.destroy?.(); } catch { /* noop */ }
+  view = null;
+  $('#reader').style.display = 'none';
+  $('#stage').innerHTML = '';
+  $('#shelf').style.display = 'block';
+};
+$('#next').onclick = () => view?.next();
+$('#prev').onclick = () => view?.prev();
+$('#tocbtn').onclick = () => { const t = $('#toc'); t.style.display = t.style.display === 'block' ? 'none' : 'block'; };
+document.addEventListener('keydown', e => {
+  if ($('#reader').style.display !== 'flex') return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown') view?.next();
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') view?.prev();
+  if (e.key === 'Escape') $('#toc').style.display = 'none';
+});
+// 外层（页边距/非 iframe 区域）滚轮翻页
+document.addEventListener('wheel', onNavWheel, { passive: false });
+
+loadShelf();
+</script>
+</body>
+</html>
