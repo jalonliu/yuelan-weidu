@@ -211,6 +211,23 @@ def save_meta(data):
     json.dump(data, open(INDEX_CACHE, "w", encoding="utf8"), ensure_ascii=False)
 
 
+OPENED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "opened.json")
+
+
+def opened_load():
+    """已打开书籍表：{相对路径小写: 首次打开时间戳}，用于「新增」角标。"""
+    if os.path.isfile(OPENED_FILE):
+        try:
+            return json.load(open(OPENED_FILE, encoding="utf8"))
+        except (OSError, ValueError):
+            return {}
+    return {}
+
+
+def opened_save(data):
+    json.dump(data, open(OPENED_FILE, "w", encoding="utf8"), ensure_ascii=False)
+
+
 def load_trash_meta():
     if os.path.isfile(TRASH_META):
         return json.load(open(TRASH_META, encoding="utf8"))
@@ -599,6 +616,9 @@ class Handler(BaseHTTPRequestHandler):
             order = {"main": 0, "adult": 1, "misc": 2}
             rows = [b for b in books if want == "all" or b["shelf"] == want]
             rows.sort(key=lambda b: (-b.get("mtime", 0), order.get(b["shelf"], 9), str(b["title"])))
+            opened = opened_load()
+            for b in rows:
+                b["opened"] = (b.get("path") or "").lower() in opened
             self._json(200, {"count": len(rows), "total": data["count"], "shelves": counts,
                              "books": [{k: v for k, v in b.items() if not k.startswith("_")} for b in rows]})
         elif path == "/api/rescan":
@@ -693,6 +713,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = unquote_path(self.path)
+        if path == "/api/rescan":
+            # 前端「重新扫描书库」走 POST；此前只在 do_GET 实现，POST 一直 404
+            # 导致「显示扫描了但加不上书」。
+            with LOCK:
+                books = build_index()
+            self._json(200, {"ok": True, "count": len(books)})
+            return
+        if path.startswith("/api/book/opened/"):
+            # 打开即消除「新增」角标：以相对路径为键，避免重建索引后 id 漂移。
+            data = get_meta()
+            bid = path.rsplit("/", 1)[1]
+            b = next((x for x in data.get("books", []) if str(x.get("id")) == bid), None)
+            if b:
+                op = opened_load()
+                op[(b.get("path") or "").lower()] = int(time.time())
+                opened_save(op)
+            self._json(200, {"ok": True})
+            return
+        if path == "/api/open-libfolder":
+            # 「添加书籍」口子：打开书库根目录，把书文件放进去后点重新扫描。
+            try:
+                os.startfile(LIB_ROOT)
+                self._json(200, {"ok": True})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": str(e)})
+            return
         if path == "/api/ai/chat":
             # AI 流式输出：SSE 逐行转发 OpenAI 兼容网关（magpie / hermes ctx.llm 等价后端）
             body = self._read_body()

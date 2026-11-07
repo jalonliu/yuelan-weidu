@@ -13,7 +13,7 @@
   #shelf h1 { font-size:20px; font-weight:600; margin:4px 0 2px; }
   #shelf .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
   #search { width:100%; max-width:420px; padding:8px 14px; border:1px solid var(--border); border-radius:8px; font-size:14px; background:var(--card); outline:none; }
-  #grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:14px; margin-top:20px; }
+  #grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-top:20px; }
   .bk { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:10px; cursor:pointer; transition:box-shadow .15s; overflow:hidden; }
   .bk:hover { box-shadow:0 4px 14px rgba(0,0,0,.10); }
   .bk .cv { height:150px; border-radius:6px; background:#e8e6e0; display:flex; align-items:center; justify-content:center; overflow:hidden; margin-bottom:8px; }
@@ -40,6 +40,18 @@
   #err { position:fixed; inset:41px 0 0; display:none; align-items:center; justify-content:center; color:#f66; font-size:14px; padding:30px; text-align:center; }
   /* 管理模式 */
   #toolbar { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
+#pager { display:flex; align-items:center; gap:10px; margin-top:16px; justify-content:center; font-size:13px; color:var(--muted-foreground,#888); }
+#pager button { cursor:pointer; border:1px solid var(--border); background:var(--card); border-radius:6px; padding:3px 10px; }
+#pager button:disabled { opacity:.4; cursor:default; }
+#grid .bk { position:relative; }
+.nb { position:absolute; top:6px; left:6px; background:#e8590c; color:#fff; font-size:11px; line-height:1; padding:3px 7px; border-radius:8px; z-index:2; }
+.bk.addcard { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px; min-height:210px; border-style:dashed; color:var(--muted-foreground,#888); }
+.bk.addcard .big { font-size:30px; }
+.bk.addcard .btns { display:flex; flex-direction:column; gap:6px; }
+.bk.addcard button { cursor:pointer; border:1px solid var(--border); background:var(--card); border-radius:6px; padding:5px 12px; font-size:13px; }
+#addModal { position:fixed; inset:0; background:rgba(0,0,0,.35); display:flex; align-items:center; justify-content:center; z-index:99; }
+#addModal .box { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; max-width:380px; font-size:14px; line-height:1.7; }
+#addModal .box button { cursor:pointer; border:1px solid var(--border); background:var(--card); border-radius:6px; padding:6px 14px; margin-right:8px; }
   #toolbar button { background:var(--card); border:1px solid var(--border); border-radius:8px; padding:6px 14px; font-size:13px; cursor:pointer; color:var(--fg); }
   #toolbar button:hover { border-color:var(--accent); color:var(--accent); }
   #toolbar button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
@@ -165,6 +177,7 @@
     <button id="coverAllBtn">🖼 无封面批量匹配</button>
   </div>
   <div id="grid"></div>
+  <div id="pager"></div>
   </div>
   <div class="view" id="wereadView">
     <div class="subtabs" id="wrSubtabs">
@@ -259,16 +272,68 @@ async function loadShelf(shelf) {
   books = d.books;
   const names = { main: '书库', misc: '杂书架', adult: '18+' };
   $('#count').textContent = `${names[bkShelf]} ${d.count} 本 / 全库 ${d.total} 本 · 书库 F:\\Users\\Calibre 书库（删入回收站可恢复）`;
+  curPage = 1;
   renderGrid(books);
 }
 
+/* ---- 书架分页：默认每页 12 本（3 栏 × 4 行），可切回连续滚动 ---- */
+const PAGE_SIZE = 12;
+let pageMode = localStorage.getItem('qmu-pagemode') || 'page';
+let curPage = 1;
+let viewList = [];
+
+function totalPages() { return Math.max(1, Math.ceil(viewList.length / PAGE_SIZE)); }
+
+function gotoPage(n) {
+  curPage = Math.min(Math.max(1, n), totalPages());
+  renderGrid(viewList);
+  const g = $('#grid');
+  if (g) window.scrollTo({ top: g.offsetTop - 60, behavior: 'smooth' });
+}
+
+function togglePageMode() {
+  pageMode = pageMode === 'page' ? 'scroll' : 'page';
+  localStorage.setItem('qmu-pagemode', pageMode);
+  renderGrid(viewList);
+}
+
+function showLibAdd() {
+  let m = document.getElementById('addModal');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'addModal';
+    document.body.appendChild(m);
+  }
+  m.innerHTML = `<div class="box">
+    <b>➕ 添加书籍到书库</b><br>
+    把书文件（epub / pdf / txt / mobi 等）放进书库文件夹，然后点「重新扫描」即可入库。<br>
+    没有封面或作者信息的书会进入「杂书架」。
+    <div style="margin-top:14px;">
+      <button id="addOpenLib">📂 打开书库文件夹</button>
+      <button id="addRescan">↻ 重新扫描</button>
+      <button id="addClose">关闭</button>
+    </div>
+  </div>`;
+  m.style.display = 'flex';
+  m.querySelector('#addOpenLib').onclick = () => fetch('/api/open-libfolder', { method: 'POST' }).catch(() => {});
+  m.querySelector('#addRescan').onclick = () => { m.style.display = 'none'; $('#rescanBtn').click(); };
+  m.querySelector('#addClose').onclick = () => { m.style.display = 'none'; };
+  m.onclick = (e) => { if (e.target === m) m.style.display = 'none'; };
+}
+
 function renderGrid(list) {
+  viewList = list;
   const grid = $('#grid');
   grid.innerHTML = '';
-  for (const b of list) {
+  let rows = list;
+  if (pageMode === 'page') {
+    const start = (curPage - 1) * PAGE_SIZE;
+    rows = list.slice(start, start + PAGE_SIZE);
+  }
+  for (const b of rows) {
     const el = document.createElement('div');
     el.className = 'bk';
-    el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="/cover/${b.id}">` : `<div class="ph">${(b.title[0] || '书')}</div>`}</div>
+    el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="/cover/${b.id}">` : `<div class="ph">${(b.title[0] || '书')}</div>`}${b.opened ? '' : '<span class="nb">新增</span>'}</div>
       <div class="tt">${esc(b.title)}</div>
       <div class="au">${esc(b.author || '')}</div>
       <span class="fm">${b.format}</span>
@@ -286,6 +351,36 @@ function renderGrid(list) {
       openBook(b);
     };
     grid.appendChild(el);
+  }
+  // 每页末尾的「添加书籍」口子
+  const add = document.createElement('div');
+  add.className = 'bk addcard';
+  add.innerHTML = `<div class="big">➕</div><div>添加书籍</div>
+    <div class="btns">
+      <button data-add="lib">📂 打开书库文件夹</button>
+      <button data-add="scan">↻ 重新扫描</button>
+    </div>`;
+  add.onclick = (ev) => {
+    const a = ev.target?.dataset?.add;
+    if (a === 'lib') return showLibAdd();
+    if (a === 'scan') return $('#rescanBtn').click();
+  };
+  grid.appendChild(add);
+
+  // 分页条（连续滚动模式下只留切换按钮）
+  const pager = $('#pager');
+  if (pageMode === 'page') {
+    const tp = totalPages();
+    pager.innerHTML = `<button id="pgPrev" ${curPage <= 1 ? 'disabled' : ''}>‹ 上一页</button>
+      <span>第 ${curPage} / ${tp} 页 · 共 ${list.length} 本</span>
+      <button id="pgNext" ${curPage >= tp ? 'disabled' : ''}>下一页 ›</button>
+      <button id="pgMode">📜 连续滚动</button>`;
+    $('#pgPrev').onclick = () => gotoPage(curPage - 1);
+    $('#pgNext').onclick = () => gotoPage(curPage + 1);
+    $('#pgMode').onclick = togglePageMode;
+  } else {
+    pager.innerHTML = `<button id="pgMode">📄 分页浏览</button><span>共 ${list.length} 本</span>`;
+    $('#pgMode').onclick = togglePageMode;
   }
 }
 const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -598,9 +693,19 @@ $('#manageBtn').onclick = () => {
 
 $('#rescanBtn').onclick = async () => {
   $('#rescanBtn').textContent = '↻ 扫描中…';
-  const r = await fetch('/api/rescan', { method: 'POST' });
-  const d = await r.json();
-  $('#rescanBtn').textContent = '↻ 重新扫描书库';
+  let r, d;
+  try {
+    r = await fetch('/api/rescan', { method: 'POST' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    d = await r.json();
+    if (!d.ok) throw new Error(d.error || '未知错误');
+  } catch (e) {
+    $('#rescanBtn').textContent = '↻ 重新扫描书库';
+    alert('扫描失败：' + e.message);
+    return;
+  }
+  $('#rescanBtn').textContent = `↻ 已扫描 ${d.count} 本`;
+  setTimeout(() => { $('#rescanBtn').textContent = '↻ 重新扫描书库'; }, 2500);
   loadShelf();
 };
 
@@ -719,6 +824,7 @@ async function delBook(b) {
 
 $('#search').addEventListener('input', e => {
   const q = e.target.value.trim().toLowerCase();
+  curPage = 1;
   if (!q) return renderGrid(books);
   renderGrid(books.filter(b => (b.title + ' ' + b.author).toLowerCase().includes(q)));
 });
@@ -1017,6 +1123,7 @@ $('#ttsBtn').onclick = () => {
 
 
 async function openBook(b) {
+  fetch('/api/book/opened/' + b.id, { method: 'POST' }).then(() => { b.opened = true; }).catch(() => {});
   $('#shelf').style.display = 'none';
   const rd = $('#reader'); rd.style.display = 'flex';
   $('#err').style.display = 'none';
