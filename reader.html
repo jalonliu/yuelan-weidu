@@ -1174,24 +1174,27 @@ function playPod(show, ep, audio) {
     <audio id="podAudio" controls autoplay style="flex:2;min-width:0;height:32px;" src="/api/podcast/audio?url=${encodeURIComponent(audio)}"></audio>`;
   bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:60;display:flex;gap:10px;align-items:center;padding:8px 12px;background:#fff;border-top:1px solid var(--border);box-shadow:0 -2px 8px rgba(0,0,0,.06);';
   const a = bar.querySelector('#podAudio');
-  // 断点续听：canplay 时跳到上次位置
-  a.addEventListener('canplay', async () => {
+  // 断点续听：就绪后跳到上次位置（canplay 可能早于历史取回，需等 loadedmetadata 兜底）
+  (async () => {
     try {
       const r = await fetch('/api/listen/history'); const d = await r.json();
       const rec = (d.history || {})[audio];
-      if (rec && rec.pos > 15 && rec.dur && rec.pos / rec.dur < 0.95) {
-        a.currentTime = rec.pos;
+      if (rec && rec.pos > 15 && !(rec.dur && rec.pos / rec.dur >= 0.95)) {
+        const apply = () => { if (a.currentTime < 5) { try { a.currentTime = rec.pos; } catch (e) {} } };
+        if (a.readyState >= 1) apply();
+        else a.addEventListener('loadedmetadata', apply, { once: true });
       }
-    } catch {}
-  }, { once: true });
+    } catch (e) {}
+    // 立即入历史（必须在读取续听位置之后，否则 pos=0 会覆盖旧进度）
+    savePos(show, ep, audio, 0, 0);
+    setTimeout(loadHistory, 1500);
+  })();
   // 进度保存：每 5 秒 + 暂停 + 关页
   let lastSave = 0;
   const save = () => { savePos(show, ep, audio, a.currentTime, a.duration); lastSave = Date.now(); };
   a.addEventListener('timeupdate', () => { if (Date.now() - lastSave > 5000) save(); });
   a.addEventListener('pause', () => save());
   window.addEventListener('beforeunload', () => save());
-  savePos(show, ep, audio, 0, 0); // 立即入历史
-  setTimeout(loadHistory, 1500);
 }
 window.playPod = playPod;
 async function listenBook(id) {
