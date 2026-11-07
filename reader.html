@@ -304,6 +304,14 @@ function togglePageMode() {
   renderGrid(viewList);
 }
 
+// 窗口尺寸变化 → 列数变了 → 页大小随列数变，需重渲染并夹紧当前页
+let rsTimer = null;
+window.addEventListener('resize', () => {
+  if (pageMode !== 'page') return;
+  clearTimeout(rsTimer);
+  rsTimer = setTimeout(() => renderGrid(viewList), 150);
+});
+
 function showLibAdd() {
   let m = document.getElementById('addModal');
   if (!m) {
