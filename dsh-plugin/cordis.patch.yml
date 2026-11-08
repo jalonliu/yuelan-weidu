@@ -1,0 +1,8 @@
+# Bundle patch layer for dsh-yuelan (阅览围读).
+#
+# The package main entry (`lib/index.js`) is the host-side Cordis plugin; the
+# `dsh.client` declaration in package.json loads `lib/client.js` into the web
+# shell, which registers the sidebar icon and the center-column panel.
+- insert:
+    - id: dsh-yuelan
+      name: dsh-yuelan
