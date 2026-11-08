@@ -47,6 +47,8 @@ WR_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wr_cache")
 WR_TTL = 24 * 3600
 # 本地阅读跟踪
 TRACK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "track.json")
+# 阅读进度（以书 path 为键，稳定不随索引 id 漂移）：{path小写: {pos, percent, lastOpen, finished}}
+PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "progress.json")
 # 三分书架：书库 main / 杂书架 misc / 18+ adult（手动覆盖存 shelf.json）
 SHELF_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shelf.json")
 FMT_RANK = {"epub": 0, "azw3": 1, "mobi": 2, "pdf": 3, "fb2": 4, "txt": 5}
@@ -653,6 +655,20 @@ def opened_save(data):
     json.dump(data, open(OPENED_FILE, "w", encoding="utf8"), ensure_ascii=False)
 
 
+def progress_load():
+    """阅读进度表：{path小写: {pos人读位置, percent全书百分比0-100, lastOpen时间戳, finished是否读完}}。path 稳定不漂移。"""
+    if os.path.isfile(PROGRESS_FILE):
+        try:
+            return json.load(open(PROGRESS_FILE, encoding="utf8"))
+        except (OSError, ValueError):
+            return {}
+    return {}
+
+
+def progress_save(data):
+    json.dump(data, open(PROGRESS_FILE, "w", encoding="utf8"), ensure_ascii=False, indent=0)
+
+
 def load_trash_meta():
     if os.path.isfile(TRASH_META):
         return json.load(open(TRASH_META, encoding="utf8"))
@@ -1116,17 +1132,73 @@ class Handler(BaseHTTPRequestHandler):
             data = get_meta()
             books, counts = classify_books(data)
             order = {"main": 0, "adult": 1, "misc": 2}
-            rows = [b for b in books if want == "all" or b["shelf"] == want]
             opened = opened_load()
-            # 最近打开的书（opened.json 记录的打开时间）冒到最前——像 Kindle 的"正在读"置顶；
-            # 其余仍按修改时间倒序。opened 里没有的书 opened_ts=0，不干扰组内原有相对顺序。
-            def _open_ts(b):
-                return opened.get((b.get("path") or "").lower(), 0) or 0
-            rows.sort(key=lambda b: (-_open_ts(b), -b.get("mtime", 0), order.get(b["shelf"], 9), str(b["title"])))
-            for b in rows:
-                b["opened"] = (b.get("path") or "").lower() in opened
+            if want == "reading":
+                # 在读：只映射书库(main)+杂书架(misc)中"读过但没读完"的书，按最近打开时间倒序；
+                # 18+(adult) 不进入；已读完(finished)的书不进在读，只留在读完记录里。
+                prog = progress_load()
+                def _pg(b):
+                    return prog.get((b.get("path") or "").lower()) or {}
+                rows = []
+                for b in books:
+                    if b["shelf"] not in ("main", "misc"):
+                        continue
+                    p = _pg(b)
+                    if not p:
+                        continue
+                    if p.get("finished"):
+                        continue
+                    if (p.get("percent") or 0) <= 0 and not p.get("pos"):
+                        continue
+                    rows.append(b)
+                rows.sort(key=lambda b: -( (_pg(b).get("lastOpen") or 0) ))
+                for b in rows:
+                    p = _pg(b)
+                    b["opened"] = True
+                    b["percent"] = p.get("percent") or 0
+                    b["lastOpen"] = p.get("lastOpen") or 0
+            else:
+                rows = [b for b in books if want == "all" or b["shelf"] == want]
+                # 最近打开的书（opened.json 记录的打开时间）冒到最前——像 Kindle 的"正在读"置顶；
+                # 其余仍按修改时间倒序。opened 里没有的书 opened_ts=0，不干扰组内原有相对顺序。
+                def _open_ts(b):
+                    return opened.get((b.get("path") or "").lower(), 0) or 0
+                rows.sort(key=lambda b: (-_open_ts(b), -b.get("mtime", 0), order.get(b["shelf"], 9), str(b["title"])))
+                for b in rows:
+                    b["opened"] = (b.get("path") or "").lower() in opened
             self._json(200, {"count": len(rows), "total": data["count"], "shelves": counts,
                              "books": [{k: v for k, v in b.items() if not k.startswith("_")} for b in rows]})
+        elif path == "/api/book/position":
+            # 读取某本书的阅读进度：?path=... 或 ?bookId=...
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            pth = (qs.get("path") or [""])[0].lower()
+            bid = (qs.get("bookId") or [""])[0]
+            data = get_meta()
+            b = None
+            if pth:
+                b = next((x for x in data.get("books", []) if (x.get("path") or "").lower() == pth), None)
+            if b is None and bid:
+                b = next((x for x in data.get("books", []) if str(x.get("id")) == bid), None)
+            if b is None:
+                self._json(404, {"ok": False, "error": "book not found"})
+            else:
+                rec = progress_load().get((b.get("path") or "").lower()) or {}
+                self._json(200, {"ok": True, "pos": rec.get("pos"), "percent": rec.get("percent") or 0,
+                                 "finished": bool(rec.get("finished")), "lastOpen": rec.get("lastOpen") or 0})
+        elif path == "/api/books/finished":
+            # 已读完毕记录（只展示，不进在读）
+            prog = progress_load()
+            data = get_meta()
+            rows = []
+            for b in data.get("books", []):
+                p = prog.get((b.get("path") or "").lower()) or {}
+                if p.get("finished"):
+                    bb = {k: v for k, v in b.items() if not k.startswith("_")}
+                    bb["percent"] = p.get("percent") or 100
+                    bb["lastOpen"] = p.get("lastOpen") or 0
+                    rows.append(bb)
+            rows.sort(key=lambda b: -(b.get("lastOpen") or 0))
+            self._json(200, {"ok": True, "count": len(rows), "books": rows})
         elif path == "/api/rescan":
             with LOCK:
                 books = build_index()
@@ -1334,7 +1406,40 @@ class Handler(BaseHTTPRequestHandler):
                 opened_save(op)
             self._json(200, {"ok": True})
             return
-        if path == "/api/open-libfolder":
+        if path == "/api/book/position":
+            # 保存/续读阅读位置：以书 path 为键（稳定不漂移）。
+            # body: {bookId(可选), path(可选), pos(CFI或滚动比例), percent(全书0-100), finished(可选)}
+            body = self._read_body()
+            data = get_meta()
+            b = None
+            pth = (body.get("path") or "").lower()
+            if pth:
+                b = next((x for x in data.get("books", []) if (x.get("path") or "").lower() == pth), None)
+            if b is None:
+                bid = str(body.get("bookId") or "")
+                b = next((x for x in data.get("books", []) if str(x.get("id")) == bid), None)
+            if b is None:
+                self._json(404, {"ok": False, "error": "book not found"})
+                return
+            key = (b.get("path") or "").lower()
+            prog = progress_load()
+            rec = prog.get(key) or {}
+            if "pos" in body and body.get("pos") not in (None, ""):
+                rec["pos"] = body.get("pos")
+            if body.get("percent") is not None:
+                try:
+                    rec["percent"] = min(100, max(0, round(float(body.get("percent")) * 100) / 100))
+                except (TypeError, ValueError):
+                    pass
+            if body.get("finished") is not None:
+                rec["finished"] = bool(body.get("finished"))
+            elif (rec.get("percent") or 0) >= 99.5:
+                rec["finished"] = True
+            rec["lastOpen"] = int(time.time())
+            prog[key] = rec
+            progress_save(prog)
+            self._json(200, {"ok": True, "percent": rec.get("percent") or 0, "finished": bool(rec.get("finished"))})
+            return
             # 「添加书籍」口子：打开书库根目录，把书文件放进去后点重新扫描。
             try:
                 os.startfile(LIB_ROOT)

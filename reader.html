@@ -169,6 +169,7 @@ body.manage .bk { outline:1px dashed var(--border); }
   <h1>阅览围读 · Hermes 版</h1>
   <div class="sub" id="count">加载书库…</div>
   <div class="subtabs" id="bkSubtabs">
+    <button data-sub="reading">📌 在读</button>
     <button data-sub="main" class="on">📖 书库</button>
     <button data-sub="misc">🧺 杂书架</button>
     <button data-sub="adult">🔞 18+</button>
@@ -286,7 +287,7 @@ async function loadShelf(shelf) {
   const r = await fetch('/api/books?shelf=' + bkShelf);
   const d = await r.json();
   books = d.books;
-  const names = { main: '书库', misc: '杂书架', adult: '18+' };
+  const names = { reading: '在读', main: '书库', misc: '杂书架', adult: '18+' };
   $('#count').textContent = `${names[bkShelf]} ${d.count} 本 / 全库 ${d.total} 本 · 书库 F:\\Users\\Calibre 书库（删入回收站可恢复）`;
   curPage = 1;
   renderGrid(books);
@@ -718,6 +719,32 @@ function startTracking(book) {
 }
 function stopTracking() {
   if (trackTimer) { clearInterval(trackTimer); trackTimer = null; }
+}
+
+/* ---- 阅读位置续读：以书 path 为键上报服务端（path 稳定，不随索引 id 漂移）---- */
+let _posTimer = null;
+function reportPos(b, pos, frac) {
+  // frac: 0..1 全书进度；pos: epub CFI 或 txt 滚动比例字符串
+  const percent = (frac == null) ? null : Math.round(frac * 10000) / 100;
+  const payload = { bookId: b.id, path: b.path || '', pos: pos != null ? String(pos) : '',
+    percent: percent == null ? undefined : percent };
+  if (percent != null && percent >= 99.5) payload.finished = true;
+  if (_posTimer) clearTimeout(_posTimer);
+  _posTimer = setTimeout(() => {
+    fetch('/api/book/position', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload) }).catch(() => {});
+  }, 500);
+}
+async function fetchPos(b) {
+  // 优先服务端(按 path)，失败再退回 localStorage(按 id)
+  try {
+    const q = b.path ? ('path=' + encodeURIComponent(b.path)) : ('bookId=' + b.id);
+    const r = await fetch('/api/book/position?' + q);
+    if (r.ok) { const d = await r.json(); if (d && d.ok && (d.pos != null || d.percent)) return d; }
+  } catch {}
+  const lp = localStorage.getItem('qmu-pos-' + b.id);
+  const lt = localStorage.getItem('qmu-txtpos-' + b.id);
+  return { pos: lp != null ? lp : (lt != null ? lt : null), percent: 0 };
 }
 // 年度切换按钮用 inline onclick，需暴露到全局
 window.loadWrWall = loadWrWall;
@@ -1300,10 +1327,14 @@ async function openTxt(b) {
     });
   };
   fill();
-  // 进度恢复 + 滚动进度上报
+  // 进度恢复 + 滚动进度上报（服务端按 path 优先，localStorage 兜底）
   const key = 'qmu-txtpos-' + b.id;
-  const saved = parseFloat(localStorage.getItem(key));
-  if (saved > 0) box.scrollTop = saved * (box.scrollHeight - box.clientHeight);
+  let saved = parseFloat(localStorage.getItem(key));
+  fetchPos(b).then(fp => {
+    const sp = fp && fp.pos != null ? parseFloat(fp.pos) : NaN;
+    const use = !isNaN(sp) ? sp : saved;
+    if (use > 0) box.scrollTop = use * (box.scrollHeight - box.clientHeight);
+  });
   let last = 0;
   box.addEventListener('scroll', () => {
     const max = box.scrollHeight - box.clientHeight;
@@ -1312,6 +1343,7 @@ async function openTxt(b) {
     b._trackPct = frac;
     if (trackMeta) trackMeta.lastProgress = frac;
     localStorage.setItem(key, frac);
+    reportPos(b, frac, frac);
     const now = Date.now();
     if (now - last > 800) {
       last = now;
@@ -1555,6 +1587,8 @@ async function openBook(b) {
     ifr.src = `/file/${b.id}`;
     stage.appendChild(ifr);
     $('#pg').textContent = fmtSize(b.size);
+    // pdf 无法精确取位置：登记为在读(pos 占位)，记录打开时间；
+    reportPos(b, 'pdf', b._trackPct != null ? b._trackPct : null);
     return;
   }
 
@@ -1593,14 +1627,20 @@ async function openBook(b) {
     });
     const book = await makeBook(file);
     await view.open(book);
-    const pos = localStorage.getItem('qmu-pos-' + b.id);
-    if (pos) { try { await view.goTo(pos); } catch { /* 位置失效忽略 */ } }
+    const saved = await fetchPos(b);
+    const pos = saved && saved.pos != null ? saved.pos : null;
+    if (pos != null && pos !== '') { try { await view.goTo(pos); } catch { /* 位置失效忽略 */ } }
     applySpread();
     applyTheme();
     startTracking({ id: b.id, title: b.title, lastProgress: b._trackPct || 0 });
     view.addEventListener('relocate', () => applyTheme());
     view.addEventListener('relocate', e => {
-      if (e.detail.cfi) localStorage.setItem('qmu-pos-' + b.id, e.detail.cfi);
+      const cfi = e.detail.cfi;
+      const frac = e.detail.fraction;
+      if (cfi) {
+        localStorage.setItem('qmu-pos-' + b.id, cfi);
+        reportPos(b, cfi, frac != null ? frac : b._trackPct);
+      }
     });
     if (window.__listenPending) {
       window.__listenPending = false;
