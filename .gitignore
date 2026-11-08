@@ -15,3 +15,6 @@ cover_test.jpg
 probe.json
 podcasts.json
 listen.json
+
+# 服务错误日志
+server.log.err

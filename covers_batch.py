@@ -4,6 +4,7 @@
 断点: 状态存 D:/Hermes/cache/scratch/covers-batch-state.json
 """
 import json, urllib.request as ur, zipfile, re, os, sys, time, importlib.util
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 spec = importlib.util.spec_from_file_location('srv', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'server.py'))
 srv = importlib.util.module_from_spec(spec); spec.loader.exec_module(srv)

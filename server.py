@@ -37,7 +37,7 @@ BOOK_EXT = {".epub", ".mobi", ".azw3", ".fb2"}
 INDEX_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "books.json")
 TRASH_DIR = os.path.join(LIB_ROOT, "_trash")
 TRASH_META = os.path.join(TRASH_DIR, ".trash-meta.json")
-SKIP_DIRS = {".calibre", ".Trash", "_trash", "Calibre"}
+SKIP_DIRS = {".calibre", ".Trash", "_trash", "_trash_dedup", "_trash_dedup_18", "_trash_covers", "Calibre"}
 # 微信读书 Agent Gateway（参考 zhaohongxuan/dsh-weread，仅 API-Key 路径）
 WEREAD_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weread.json")
 WEREAD_URL = "https://i.weread.qq.com/api/agent/gateway"
@@ -123,6 +123,17 @@ import struct as _struct
 
 _RENAME_BAD = r'[\\/:*?"<>|]'
 _RENAME_PYN = re.compile(r'^[\x20-\x7e]+\.(epub|mobi|pdf|azw3?|txt)$')
+_RENAME_EXT = re.compile(r'\.(epub|mobi|pdf|azw3?|txt|fb2)$', re.I)
+# 文件名结尾的副本标记：(2) （3） -副本 - 副本 副本（可反复剥除）
+_RENAME_COPY = re.compile(r'(?:\s*[\(（]\d+[\)）])+\s*$|(?:\s*[-－—_]?\s*副本)+\s*$')
+
+def _strip_copy_marks(stem):
+    """去掉文件名结尾的副本标记 (n)/（n）/- 副本/副本，保留书名中间的括号。"""
+    prev = None
+    while prev != stem:
+        prev = stem
+        stem = _RENAME_COPY.sub('', stem).rstrip()
+    return stem
 
 def book_meta(fp, ext):
     """从书文件内嵌元数据提取 (标题, 作者)：epub OPF > mobi EXTH > pdf Info.Title。"""
@@ -168,59 +179,101 @@ def book_meta(fp, ext):
         pass
     return ('', '')
 
+def _sanitize_meta_title(title, author):
+    """清洗元数据书名/作者：去非法字符、去出版商杂注、截断超长。"""
+    title = re.sub(_RENAME_BAD, '', title or '').strip()
+    author = re.sub(_RENAME_BAD, '', author or '').strip()
+    title = re.sub(r'\s*[\(\[](BookDNA|果麦|博集|后浪|磨铁|读客|掌阅|微信读书|Kindle)[^\)\]]*[\)\]]', '', title).strip()
+    title = title.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"')
+    title = re.split(r'\s*[-–:：]\s*(?:\[[^\]]*\]|[\u4e00-\u9fff]{0,3}出版社|译)', title)[0].strip() or title
+    if len(title) > 60:
+        title = title[:60].rstrip()
+    if len(author) > 30:
+        author = author[:30].rstrip()
+    return title, author
+
 def rename_plan():
-    """拼音文件名 → 元数据中文书名的改名清单（含冲突与封面联动）。"""
+    """书库顶级目录下所有电子书的「整理书名」清单：
+    1) 有内嵌中文元数据且文件名是拼音/ASCII → 改用元数据中文书名；
+    2) 文件名结尾带副本标记 (n)/副本 → 去标记；
+    两种规则可叠加。返回改名项（含冲突与封面联动）。"""
     out = []
     for d in ('书库', '杂书架', '18+'):
         full_dir = os.path.join(LIB_ROOT, d)
         if not os.path.isdir(full_dir):
             continue
         for f in sorted(os.listdir(full_dir)):
-            if f.endswith('.cover.jpg') or not _RENAME_PYN.match(f):
+            if f.endswith('.cover.jpg'):
                 continue
-            fp = os.path.join(full_dir, f)
             ext = os.path.splitext(f)[1].lower()
-            title, author = book_meta(fp, ext)
-            if not title or not re.search(r'[\u4e00-\u9fff]', title):
+            if ext not in ('.epub', '.mobi', '.azw3', '.pdf', '.txt', '.fb2'):
                 continue
-            title = re.sub(_RENAME_BAD, '', title).strip()
-            author = re.sub(_RENAME_BAD, '', author).strip()
-            title = re.sub(r'\s*[\(\[](BookDNA|果麦|博集|后浪|磨铁|读客|掌阅|微信读书|Kindle)[^\)\]]*[\)\]]', '', title).strip()
-            title = title.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"')
-            title = re.split(r'\s*[-–:：]\s*(?:\[[^\]]*\]|[\u4e00-\u9fff]{0,3}出版社|译)', title)[0].strip() or title
-            if len(title) > 60:
-                title = title[:60].rstrip()
-            if len(author) > 30:
-                author = author[:30].rstrip()
-            if author.lower() in ('unknown', '', 'z-library', 'calibre'):
-                newname = f'{title}{ext}'
-            else:
-                newname = f'{title} - {author}{ext}'
+            stem = os.path.splitext(f)[0]
+            fp = os.path.join(full_dir, f)
+            newstem = None
+            reason = []
+            # 规则1：拼音/ASCII 文件名 → 元数据中文名
+            if _RENAME_PYN.match(f):
+                title, author = book_meta(fp, ext)
+                if title and re.search(r'[\u4e00-\u9fff]', title):
+                    title, author = _sanitize_meta_title(title, author)
+                    if author.lower() in ('unknown', '', 'z-library', 'calibre'):
+                        newstem = title
+                    else:
+                        newstem = f'{title} - {author}'
+                    reason.append('拼音→中文')
+            # 规则2：结尾副本标记（对任何书名，中文名也算）
+            base_stem = newstem if newstem is not None else stem
+            stripped = _strip_copy_marks(base_stem)
+            if stripped != base_stem:
+                newstem = stripped
+                reason.append('去副本标记')
+            if newstem is None or newstem == stem:
+                continue
+            newname = newstem + ext
             if len(newname) > 150:
-                newname = newname[:147] + ext
+                newname = newname[:150 - len(ext)] + ext
             cov = os.path.splitext(f)[0] + '.cover.jpg'
             out.append({
-                'dir': d, 'old': f, 'new': newname,
+                'dir': d, 'old': f, 'new': newname, 'reason': '+'.join(reason),
                 'src': fp, 'dst': os.path.join(full_dir, newname),
                 'cov_old': os.path.join(full_dir, cov) if os.path.isfile(os.path.join(full_dir, cov)) else None,
                 'cov_new': os.path.join(full_dir, os.path.splitext(newname)[0] + '.cover.jpg'),
             })
     conflict = [it for it in out if os.path.isfile(it['dst']) and os.path.normcase(it['dst']) != os.path.normcase(it['src'])]
-    return {'items': out, 'conflicts': [it['old'] for it in conflict]}
+    cnames = {it['old'] for it in conflict}
+    return {'items': [it for it in out if it['old'] not in cnames],
+            'conflicts': [it['old'] for it in conflict]}
 
 def rename_apply(items):
-    """执行改名：文件 + 专属封面 + opened.json 路径键改写。"""
+    """执行改名：文件 + 专属封面 + opened.json 路径键改写。
+    两阶段改名（先→临时名，再→最终名）避免批量改名中间态互相撞名。"""
     moved = {}
     fail = []
-    for it in items:
+    # 阶段1：全部挪到临时名，并记录 src→tmp / tmp→dst 映射
+    staged = []
+    for idx, it in enumerate(items):
         try:
-            os.rename(it['src'], it['dst'])
+            tmp = os.path.join(os.path.dirname(it['src']), f"__ren_tmp_{idx}{os.path.splitext(it['src'])[1]}")
+            os.rename(it['src'], tmp)
+            staged.append((it, tmp))
+        except OSError as e:
+            fail.append({'old': it['old'], 'error': type(e).__name__})
+    # 阶段2：临时名 → 最终名
+    for it, tmp in staged:
+        try:
+            os.rename(tmp, it['dst'])
             if it['cov_old']:
                 try:
                     os.rename(it['cov_old'], it['cov_new'])
                 except OSError:
                     pass
         except OSError as e:
+            # 回滚到原名
+            try:
+                os.rename(tmp, it['src'])
+            except OSError:
+                pass
             fail.append({'old': it['old'], 'error': type(e).__name__})
             continue
         moved[os.path.join(it['dir'], it['old']).lower()] = os.path.join(it['dir'], it['new']).lower()
@@ -234,6 +287,108 @@ def rename_apply(items):
             op[moved[kk]] = op.pop(k)
     json.dump(op, open(OPENED_FILE, 'w', encoding='utf-8'), ensure_ascii=False)
     return {'moved': len(moved), 'fail': fail}
+
+# ---- 去重：同书名(+作者) 归组，组内按 epub>azw3>mobi>pdf>txt 再体积降序保留；删除=移入回收站 ----
+DEDUP_TRASH = os.path.join(LIB_ROOT, "_trash_dedup")
+_DEDUP_EXT = {'.epub', '.mobi', '.azw3', '.pdf', '.txt', '.fb2'}
+_DEDUP_PRIORITY = {'.epub': 0, '.azw3': 1, '.mobi': 2, '.pdf': 3, '.txt': 4, '.fb2': 5}
+
+def _dedup_key(stem):
+    """书名去噪：去副本标记、去结尾 (n)、NFKC、小写。"""
+    import unicodedata
+    s = unicodedata.normalize('NFKC', stem or '')
+    s = _strip_copy_marks(s)
+    s = re.sub(r'\s*[\(\（]\d+[\)\）]\s*$', '', s)
+    return re.sub(r'\s+', '', s).strip().lower()
+
+def _dedup_author(fname):
+    """从 '书名 - 作者' 里粗提作者（最后一个 - 之后），先剥副本标记，仅作同书判定辅助。"""
+    stem = _strip_copy_marks(os.path.splitext(fname)[0])
+    if ' - ' in stem:
+        return _strip_copy_marks(stem.rsplit(' - ', 1)[1]).strip().lower()
+    return ''
+
+def dedup_plan():
+    """扫描三个书库目录，返回重复组与删除计划（不执行）。
+    规则：同 _dedup_key(title)+作者 归组；组内 .epub 优先、其余按格式优先级 + 体积降序保留第一个。
+    保护：某候选体积 > 保留项 2.5 倍且非纯 (n) 副本 —— 视为不同版本，整组跳过不删。"""
+    groups = {}
+    for d in ('书库', '杂书架', '18+'):
+        full_dir = os.path.join(LIB_ROOT, d)
+        if not os.path.isdir(full_dir):
+            continue
+        for f in sorted(os.listdir(full_dir)):
+            if f.endswith('.cover.jpg'):
+                continue
+            ext = os.path.splitext(f)[1].lower()
+            if ext not in _DEDUP_EXT:
+                continue
+            fp = os.path.join(full_dir, f)
+            try:
+                size = os.path.getsize(fp)
+            except OSError:
+                continue
+            stem = os.path.splitext(f)[0]
+            gk = (_dedup_key(stem), _dedup_author(f))
+            groups.setdefault(gk, []).append(
+                {'dir': d, 'file': f, 'ext': ext, 'size': size, 'src': fp})
+    plan, protected = [], []
+    for gk, rows in groups.items():
+        if len(rows) < 2:
+            continue
+        ordered = sorted(rows, key=lambda x: (_DEDUP_PRIORITY.get(x['ext'], 9), -x['size']))
+        keep = ordered[0]
+        dels = ordered[1:]
+        # 体积保护：某本远大于保留本（>2.5x）且保留本不是 (n) 副本 → 保护整组
+        big = [r for r in dels if r['size'] > keep['size'] * 2.5]
+        if big:
+            protected.append({'keep': keep['file'],
+                              'skip': [r['file'] for r in big], 'reason': 'bigger-variant'})
+            continue
+        plan.append({'keep': keep, 'del': dels, 'key': gk[0]})
+    return {'groups': plan, 'protected': protected}
+
+def dedup_apply(plan):
+    """执行去重：把要删的书（+ 其 sidecar 封面）移入 _trash_dedup，不真删。"""
+    meta = {}
+    meta_file = os.path.join(DEDUP_TRASH, '.dedup-meta.json')
+    os.makedirs(DEDUP_TRASH, exist_ok=True)
+    if os.path.isfile(meta_file):
+        try:
+            meta = json.load(open(meta_file, encoding='utf-8'))
+        except Exception:
+            meta = {}
+    moved, fail = [], []
+    for grp in plan.get('groups', []):
+        for r in grp['del']:
+            src = r['src']
+            if not os.path.isfile(src):
+                continue
+            base = os.path.basename(src)
+            dst = os.path.join(DEDUP_TRASH, base)
+            n = 1
+            while os.path.exists(dst):
+                root, ext = os.path.splitext(base)
+                dst = os.path.join(DEDUP_TRASH, f"{root} ({n}){ext}")
+                n += 1
+            try:
+                shutil.move(src, dst)
+                # 同步移动专属封面 sidecar
+                cov = os.path.splitext(src)[0] + '.cover.jpg'
+                if os.path.isfile(cov):
+                    cbase = os.path.splitext(os.path.basename(dst))[0] + '.cover.jpg'
+                    shutil.move(cov, os.path.join(DEDUP_TRASH, cbase))
+                meta[os.path.basename(dst)] = {
+                    'orig': os.path.join(r['dir'], r['file']),
+                    'kept': os.path.join(grp['keep']['dir'], grp['keep']['file'])}
+                moved.append(os.path.join(r['dir'], r['file']))
+            except OSError as e:
+                fail.append({'file': r['file'], 'error': type(e).__name__})
+    json.dump(meta, open(meta_file, 'w', encoding='utf-8'), ensure_ascii=False)
+    if moved:
+        with LOCK:
+            build_index()
+    return {'moved': len(moved), 'fail': fail, 'trash': DEDUP_TRASH}
 
 def classify_books(data):
     """给每本书标 shelf：adult=关键词命中或手动覆盖；main=封面+作者全且重名最优副本；其余 misc。"""
@@ -1018,7 +1173,21 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, {"ok": True, "count": len(plan["items"]),
                                  "conflicts": plan["conflicts"],
-                                 "items": [{"old": it["old"], "new": it["new"]} for it in plan["items"][:50]]})
+                                 "items": [{"old": it["old"], "new": it["new"], "reason": it.get("reason", "")} for it in plan["items"][:50]]})
+        elif path == "/api/tools/dedup":
+            try:
+                p = dedup_plan()
+                items = []
+                for g in p["groups"]:
+                    items.append({"keep": g["keep"]["file"], "keep_dir": g["keep"]["dir"],
+                                  "del": [d["file"] for d in g["del"]]})
+                self._json(200, {"ok": True,
+                                 "groups": len(p["groups"]),
+                                 "del_count": sum(len(g["del"]) for g in p["groups"]),
+                                 "protected": p["protected"],
+                                 "items": items[:50]})
+            except Exception as e:
+                self._json(500, {"ok": False, "error": str(e)})
         elif path.startswith("/api/covers/search/"):
             self._cover_search(path.rsplit("/", 1)[1])
         elif path == "/api/notes/all":
@@ -1280,7 +1449,19 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, {"ok": True, "count": len(plan["items"]),
                                  "conflicts": plan["conflicts"],
-                                 "items": [{"old": it["old"], "new": it["new"]} for it in plan["items"][:50]]})
+                                 "items": [{"old": it["old"], "new": it["new"], "reason": it.get("reason", "")} for it in plan["items"][:50]]})
+        elif path == "/api/tools/dedup":
+            body = self._read_body()
+            if body and body.get("apply"):
+                p = dedup_plan()
+                self._json(200, {"ok": True, **dedup_apply(p)})
+            else:
+                p = dedup_plan()
+                items = [{"keep": g["keep"]["file"], "keep_dir": g["keep"]["dir"],
+                          "del": [d["file"] for d in g["del"]]} for g in p["groups"]]
+                self._json(200, {"ok": True, "groups": len(p["groups"]),
+                                 "del_count": sum(len(g["del"]) for g in p["groups"]),
+                                 "protected": p["protected"], "items": items[:50]})
         elif path == "/api/manage/purge":
             self._purge(None)
         elif path.startswith("/api/manage/purge/"):
