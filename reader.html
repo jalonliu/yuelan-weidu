@@ -187,6 +187,7 @@ body.manage .bk { outline:1px dashed var(--border); }
     <button id="rescanBtn">↻ 重新扫描书库</button>
     <button id="trashBtn">♻ 回收站</button>
     <button id="coverAllBtn">🖼 无封面批量匹配</button>
+    <button id="renameBtn">📝 拼音改名（元数据书名）</button>
   </div>
   <div id="grid"></div>
   <div id="pager"></div>
@@ -923,6 +924,23 @@ $('#coverAllBtn').onclick = async () => {
   }
   $('#coverAllBtn').textContent = '🖼 无封面批量匹配';
   alert(`批量匹配完成：成功 ${ok}，失败 ${fail}（失败可单独重试）`);
+  loadShelf();
+};
+
+$('#renameBtn').onclick = async () => {
+  $('#renameBtn').textContent = '⏳ 提取中…';
+  const s = await fetch('/api/tools/rename-pinyin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  const d = await s.json();
+  $('#renameBtn').textContent = '📝 拼音改名（元数据书名）';
+  if (!d.ok || !d.count) { alert(d.ok ? `没有可改名的拼音文件（需内嵌中文元数据）` : ('失败: ' + (d.error || ''))); return; }
+  const preview = d.items.slice(0, 12).map(it => `${it.old.slice(0, 30)}\n→ ${it.new}`).join('\n');
+  const more = d.count > d.items.length ? `\n…等共 ${d.count} 本` : '';
+  if (!confirm(`找到 ${d.count} 本拼音名书籍可按内嵌元数据改为中文书名${d.conflicts?.length ? `，${d.conflicts.length} 本重名跳过` : ''}：\n\n${preview}${more}\n\n继续改名？（封面与阅读记录跟随移动）`)) return;
+  $('#renameBtn').textContent = '⏳ 改名中…';
+  const a = await fetch('/api/tools/rename-pinyin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apply: true }) });
+  const ad = await a.json();
+  $('#renameBtn').textContent = '📝 拼音改名（元数据书名）';
+  alert(`改名完成：${ad.moved} 本${ad.fail?.length ? `，失败 ${ad.fail.length} 本（文件占用/重名）` : ''}`);
   loadShelf();
 };
 

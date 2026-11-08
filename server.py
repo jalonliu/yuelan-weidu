@@ -117,6 +117,124 @@ def move_book_file(rel, shelf):
         json.dump(ov, open(SHELF_FILE, "w", encoding="utf-8"), ensure_ascii=False)
     return os.path.relpath(dest, LIB_ROOT)
 
+# ---- 书库工具：元数据提取 / 拼音改名 ----
+import zipfile as _zip
+import struct as _struct
+
+_RENAME_BAD = r'[\\/:*?"<>|]'
+_RENAME_PYN = re.compile(r'^[A-Za-z0-9\s\-_.\(\)\[\]]+\.(epub|mobi|pdf|azw3?|txt)$')
+
+def book_meta(fp, ext):
+    """从书文件内嵌元数据提取 (标题, 作者)：epub OPF > mobi EXTH > pdf Info.Title。"""
+    try:
+        if ext == '.epub':
+            z = _zip.ZipFile(fp)
+            opf = [n for n in z.namelist() if n.endswith('.opf')][0]
+            t = z.read(opf).decode('utf-8', 'ignore')
+            ti = re.search(r'<dc:title[^>]*>(.*?)</dc:title>', t, re.S)
+            au = re.search(r'<dc:creator[^>]*>(.*?)</dc:creator>', t, re.S)
+            return (ti.group(1).strip() if ti else '', au.group(1).strip() if au else '')
+        if ext in ('.mobi', '.azw3'):
+            raw = open(fp, 'rb').read(6 * 1024 * 1024)
+            if raw[:4] not in (b'BOOK', b'TEXt'):
+                return ('', '')
+            off = _struct.unpack('>I', raw[16:20])[0]
+            if raw[off + 16:off + 20] != b'MOBI':
+                return ('', '')
+            exth = off + _struct.unpack('>I', raw[off + 20:off + 24])[0]
+            if raw[exth:exth + 4] != b'EXTH':
+                return ('', '')
+            cnt = _struct.unpack('>I', raw[exth + 8:exth + 12])[0]
+            p = exth + 12
+            title = author = ''
+            for _ in range(cnt):
+                rtype, rlen = _struct.unpack('>II', raw[p:p + 8])
+                val = raw[p + 8:p + rlen].decode('utf-8', 'ignore')
+                if rtype == 503:
+                    title = val
+                elif rtype == 100:
+                    author = val
+                p += rlen
+            return (title.strip(), author.strip())
+        if ext == '.pdf':
+            raw = open(fp, 'rb').read(3 * 1024 * 1024)
+            m = re.search(rb'/Title\s*\(([^)]{2,80})\)', raw)
+            if m:
+                try:
+                    return (m.group(1).decode('utf-16-be').strip('\x00'), '')
+                except Exception:
+                    return (m.group(1).decode('latin-1', 'ignore').strip(), '')
+    except Exception:
+        pass
+    return ('', '')
+
+def rename_plan():
+    """拼音文件名 → 元数据中文书名的改名清单（含冲突与封面联动）。"""
+    out = []
+    for d in ('书库', '杂书架', '18+'):
+        full_dir = os.path.join(LIB_ROOT, d)
+        if not os.path.isdir(full_dir):
+            continue
+        for f in sorted(os.listdir(full_dir)):
+            if f.endswith('.cover.jpg') or not _RENAME_PYN.match(f):
+                continue
+            fp = os.path.join(full_dir, f)
+            ext = os.path.splitext(f)[1].lower()
+            title, author = book_meta(fp, ext)
+            if not title or not re.search(r'[\u4e00-\u9fff]', title):
+                continue
+            title = re.sub(_RENAME_BAD, '', title).strip()
+            author = re.sub(_RENAME_BAD, '', author).strip()
+            title = re.sub(r'\s*[\(\[](BookDNA|果麦|博集|后浪|磨铁|读客|掌阅|微信读书|Kindle)[^\)\]]*[\)\]]', '', title).strip()
+            title = title.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"')
+            title = re.split(r'\s*[-–:：]\s*(?:\[[^\]]*\]|[\u4e00-\u9fff]{0,3}出版社|译)', title)[0].strip() or title
+            if len(title) > 60:
+                title = title[:60].rstrip()
+            if len(author) > 30:
+                author = author[:30].rstrip()
+            if author.lower() in ('unknown', '', 'z-library', 'calibre'):
+                newname = f'{title}{ext}'
+            else:
+                newname = f'{title} - {author}{ext}'
+            if len(newname) > 150:
+                newname = newname[:147] + ext
+            cov = os.path.splitext(f)[0] + '.cover.jpg'
+            out.append({
+                'dir': d, 'old': f, 'new': newname,
+                'src': fp, 'dst': os.path.join(full_dir, newname),
+                'cov_old': os.path.join(full_dir, cov) if os.path.isfile(os.path.join(full_dir, cov)) else None,
+                'cov_new': os.path.join(full_dir, os.path.splitext(newname)[0] + '.cover.jpg'),
+            })
+    conflict = [it for it in out if os.path.isfile(it['dst']) and os.path.normcase(it['dst']) != os.path.normcase(it['src'])]
+    return {'items': out, 'conflicts': [it['old'] for it in conflict]}
+
+def rename_apply(items):
+    """执行改名：文件 + 专属封面 + opened.json 路径键改写。"""
+    moved = {}
+    fail = []
+    for it in items:
+        try:
+            os.rename(it['src'], it['dst'])
+            if it['cov_old']:
+                try:
+                    os.rename(it['cov_old'], it['cov_new'])
+                except OSError:
+                    pass
+        except OSError as e:
+            fail.append({'old': it['old'], 'error': type(e).__name__})
+            continue
+        moved[os.path.join(it['dir'], it['old']).lower()] = os.path.join(it['dir'], it['new']).lower()
+    try:
+        op = json.load(open(OPENED_FILE, encoding='utf-8'))
+    except Exception:
+        op = {}
+    for k in list(op.keys()):
+        kk = k.replace('/', '\\')
+        if kk in moved:
+            op[moved[kk]] = op.pop(k)
+    json.dump(op, open(OPENED_FILE, 'w', encoding='utf-8'), ensure_ascii=False)
+    return {'moved': len(moved), 'fail': fail}
+
 def classify_books(data):
     """给每本书标 shelf：adult=关键词命中或手动覆盖；main=封面+作者全且重名最优副本；其余 misc。"""
     books = data["books"]
@@ -891,6 +1009,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, weread_notes(bid))
             except WereadError as e:
                 self._json(e.status, {"ok": False, "code": e.code, "error": str(e)})
+        elif path == "/api/tools/rename-pinyin":
+            body = self._read_body() if body is None else body
+            plan = rename_plan()
+            if body and body.get("apply"):
+                items = [it for it in plan["items"] if it["old"] not in plan["conflicts"]]
+                self._json(200, {"ok": True, **rename_apply(items)})
+            else:
+                self._json(200, {"ok": True, "count": len(plan["items"]),
+                                 "conflicts": plan["conflicts"],
+                                 "items": [{"old": it["old"], "new": it["new"]} for it in plan["items"][:50]]})
+        elif path.startswith("/api/covers/search/"):
+            self._cover_search(path.rsplit("/", 1)[1])
         elif path == "/api/notes/all":
             try:
                 self._json(200, notes_index())
@@ -1141,6 +1271,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True})
             except Exception as e:
                 self._json(500, {"ok": False, "error": str(e)})
+        elif path == "/api/tools/rename-pinyin":
+            body = self._read_body()
+            plan = rename_plan()
+            if body and body.get("apply"):
+                items = [it for it in plan["items"] if it["old"] not in plan["conflicts"]]
+                self._json(200, {"ok": True, **rename_apply(items)})
+            else:
+                self._json(200, {"ok": True, "count": len(plan["items"]),
+                                 "conflicts": plan["conflicts"],
+                                 "items": [{"old": it["old"], "new": it["new"]} for it in plan["items"][:50]]})
         elif path == "/api/manage/purge":
             self._purge(None)
         elif path.startswith("/api/manage/purge/"):
@@ -1155,8 +1295,20 @@ class Handler(BaseHTTPRequestHandler):
         if not book:
             self._json(404, {"ok": False, "error": "book not found"})
             return
-        q = book["title"] + ((" " + book["author"]) if book["author"] else "")
-        self._json(200, dict(query=q, **cover_search(cover_queries(book["title"], book["author"]))))
+        q_title, q_author = book.get("title") or "", book.get("author") or ""
+        # 索引标题是拼音时，从书内嵌元数据取中文书名兜底
+        if q_title and not re.search(r'[\u4e00-\u9fff]', q_title):
+            try:
+                mt, ma = book_meta(os.path.join(LIB_ROOT, book["path"]), os.path.splitext(book["path"])[1].lower())
+                if re.search(r'[\u4e00-\u9fff]', mt):
+                    q_title, q_author = mt, ma or q_author
+            except Exception:
+                pass
+        return self._cover_search_data(bid, q_title, q_author)
+
+    def _cover_search_data(self, bid, q_title, q_author):
+        q = q_title + ((" " + q_author) if q_author else "")
+        self._json(200, dict(query=q, **cover_search(cover_queries(q_title, q_author))))
 
     def _cover_apply(self, bid):
         body = self._read_body()
