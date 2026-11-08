@@ -50,6 +50,22 @@
   （pnpm 从 git 安装时会自动构建 lib/）。本仓库即用
   `github:jalonliu/yuelan-weidu#path:/dsh-plugin`。
 
+### ⑩ 用 PowerShell 写 JSON 会带 BOM（宿主启动直接崩）
+
+- Windows PowerShell 5.1 的 `Set-Content -Encoding UTF8` / `Out-File` 会写入
+  **带 BOM 的 UTF-8**。profile 的 package.json 一旦带 BOM，宿主启动时
+  `readProfileManifest → JSON.parse` 立即抛
+  `Unexpected token '', "{\"name\"... is not valid JSON"`（host.log，不是 web-boot）。
+- 症状识别：崩溃日志 source 是 **host**、错误是 JSON 解析、且报错文本以
+  不可见字符开头——九成是 BOM。
+- **要点**：改 JSON 用 node（`JSON.parse` + `fs.writeFileSync`，默认无 BOM），
+  或 `Set-Content -Encoding utf8NoBOM`（PowerShell 7+）。
+  排查命令：
+
+  ```js
+  const b = fs.readFileSync(f); console.log(b[0] === 0xEF) // true = 有 BOM
+  ```
+
 ### ⑨ 改完宿主/插件代码只点"重启"
 - 重启按钮只刷新 web shell；宿主端与插件代码要**完全退出应用再启动**才会重新加载。
 
