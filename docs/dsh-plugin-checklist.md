@@ -37,7 +37,20 @@
 - 注册包在 `ctx.effect` 内（随 fiber 生命周期清理）并不会导致图标"错过首帧"；
   真正让图标消失的是 apply 抛异常。**先保证 apply 不抛，再谈时机优化。**
 
-### ⑦ 改完宿主/插件代码只点"重启"
+### ⑦ file: 本地路径安装不可移植
+
+- `dsh plugin add --save-prod "file:D:/jalon/xxx"` 是**绝对路径**，换机器/换盘符即失效。
+- **要点**：源码推到 GitHub 后改用 git 形态安装：
+
+  ```
+  dsh plugin --profile web add --save-prod "github:<user>/<repo>#path:/<子目录>"
+  ```
+
+  并在 package.json 加 `"prepare": "node scripts/build.mjs"`
+  （pnpm 从 git 安装时会自动构建 lib/）。本仓库即用
+  `github:jalonliu/yuelan-weidu#path:/dsh-plugin`。
+
+### ⑨ 改完宿主/插件代码只点"重启"
 - 重启按钮只刷新 web shell；宿主端与插件代码要**完全退出应用再启动**才会重新加载。
 
 ## 二、修复检查清单（发布前逐项打勾）
