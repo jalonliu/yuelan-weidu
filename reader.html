@@ -361,7 +361,7 @@ function renderGrid(list) {
   for (const b of rows) {
     const el = document.createElement('div');
     el.className = 'bk';
-    el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="/cover/${b.id}">` : `<div class="ph">${(b.title[0] || '书')}</div>`}${b.opened ? '' : '<span class="nb">新增</span>'}<label class="selbox" title="选择"><input type="checkbox" data-selpath="${esc(b.path)}"></label></div>
+    el.innerHTML = `<div class="cv">${b.cover ? `<img loading="lazy" src="/cover/${b.id}">` : `<div class="ph">${(b.title[0] || '书')}</div>`}${b.opened ? '' : '<span class="nb">新增</span>'}<label class="selbox" title="选择"><input type="checkbox" data-selpath="${esc(b.path)}" ${mgrSel.has((b.path||'').toLowerCase()) ? 'checked' : ''}></label></div>
       <div class="tt">${esc(b.title)}</div>
       <div class="au">${esc(b.author || '')}</div>
       <span class="fm">${b.format}</span>
@@ -730,20 +730,35 @@ function mgrUpdate() {
     document.getElementById('toolbar').after(bar);
   }
   const n = mgrSel.size;
-  if (!document.body.classList.contains('manage') || !n) { bar.style.display = 'none'; return; }
+  if (!document.body.classList.contains('manage')) { bar.style.display = 'none'; return; }
   bar.style.display = 'flex';
-  bar.innerHTML = `<b>已选 ${n} 本</b>
+  bar.innerHTML = n
+    ? `<b>已选 ${n} 本</b>
+    <button data-b="all">☑ 全选本页</button>
     <button data-b="main">📚 移入书库</button>
     <button data-b="misc">🧺 移入杂书架</button>
     <button data-b="adult">🔞 移入18+</button>
     <button data-b="del">♻ 删除（回收站）</button>
+    <button data-b="clear">清除选择</button>`
+    : `<b>未选择</b>
+    <button data-b="all">☑ 全选本页</button>
     <button data-b="clear">清除选择</button>`;
   bar.querySelectorAll('button').forEach(btn => btn.onclick = () => mgrAct(btn.dataset.b));
 }
 async function mgrAct(act) {
-  if (!mgrSel.size) return;
-  const sel = [...mgrSel];
   if (act === 'clear') { mgrSel.clear(); mgrUpdate(); renderGrid(viewList); return; }
+  if (act === 'all') {
+    // 全选当前页（分页模式取当前页，滚动模式取当前渲染列表）
+    let rows = viewList;
+    if (pageMode === 'page') {
+      const start = (curPage - 1) * pageSize();
+      rows = viewList.slice(start, start + pageSize());
+    }
+    rows.forEach(b => { if (b.path) mgrSel.add(b.path.toLowerCase()); });
+    mgrUpdate(); renderGrid(viewList);
+    return;
+  }
+  const sel = [...mgrSel];
   if (act === 'del') {
     if (!confirm(`把选中的 ${sel.length} 本书移入回收站？\n文件移入 _trash，可随时恢复。`)) return;
     let ok = 0, fail = 0;
