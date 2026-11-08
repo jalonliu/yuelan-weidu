@@ -183,7 +183,7 @@ body.manage .bk { outline:1px dashed var(--border); }
   <div class="view on" id="localView">
   <input id="search" placeholder="搜书名 / 作者，回车清空">
   <div id="toolbar">
-    <button id="manageBtn">🗑 管理模式</button>
+    <button id="manageBtn">📋 管理 / 批量转移</button>
     <button id="rescanBtn">↻ 重新扫描书库</button>
     <button id="trashBtn">♻ 回收站</button>
     <button id="coverAllBtn">🖼 无封面批量匹配</button>
@@ -763,16 +763,20 @@ async function mgrAct(act) {
   const r = await fetch('/api/shelf/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ paths: sel, shelf: act }) });
   const d = await r.json();
-  if (!d.ok) return alert('批量移动失败：' + (d.error || '?'));
-  mgrSel.clear(); mgrUpdate(); loadShelf();
-}
+    if (!d.ok) return alert('批量移动失败：' + (d.error || '?'));
+    mgrSel.clear(); mgrUpdate(); loadShelf();
+    alert(`转移完成：成功 ${d.moved ?? sel.length} 本${d.skipped ? `，跳过 ${d.skipped} 本` : ''}\n文件与封面已同步迁移到目标书架。`);
+  }
 
-$('#manageBtn').onclick = () => {
-  document.body.classList.toggle('manage');
-  $('#manageBtn').classList.toggle('on');
-  mgrSel.clear();
-  mgrUpdate();
-  renderGrid(viewList);
+  $('#manageBtn').onclick = () => {
+    const on = !document.body.classList.contains('manage');
+    document.body.classList.toggle('manage', on);
+    $('#manageBtn').classList.toggle('on', on);
+    $('#manageBtn').textContent = on ? '✓ 退出管理' : '📋 管理 / 批量转移';
+    mgrSel.clear();
+    mgrUpdate();
+    renderGrid(viewList);
+    if (on) alert('管理模式：点击书封左上角勾选（可多选），顶部会出现转移按钮——移入书库 / 杂书架 / 18+ / 删除，文件会真实移动并带走封面。');
 };
 
 $('#rescanBtn').onclick = async () => {
