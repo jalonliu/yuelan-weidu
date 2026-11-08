@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "dsh-yuelan",
   "version": "1.1.4",
   "description": "DeepSeek Harness (dsh) plugin: 闃呰鍥磋 full reader 鈥?Calibre library, foliate reader, WeChat Reading shelf/stats, today/retrospect, TTS listening and streaming AI summaries. Host wakes the local server; the panel embeds the full UI.",
@@ -42,7 +42,8 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepare": "node scripts/build.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
