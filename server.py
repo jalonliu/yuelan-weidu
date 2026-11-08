@@ -995,6 +995,16 @@ def cover_queries(title, author):
     return queries
 
 
+def _is_valid_image(raw, min_bytes=5000):
+    """校验下载字节是有效图片：JPEG(FFD8FF)/PNG(89504E)/GIF/WebP 魔数 + 体积门槛。"""
+    if not raw or len(raw) < min_bytes:
+        return False
+    sig = raw[:4]
+    return (sig[:3] == b'\xff\xd8\xff'          # JPEG
+            or sig == b'\x89PNG'                 # PNG
+            or sig[:3] == b'GIF'                 # GIF
+            or (raw[:4] == b'RIFF' and raw[8:12] == b'WEBP'))  # WebP
+
 def cover_search(queries):
     """豆瓣 suggest 接口 -> 候选列表；逐个查询词回退，返回首个有结果的。"""
     if isinstance(queries, str):
@@ -1412,6 +1422,8 @@ class Handler(BaseHTTPRequestHandler):
                 cfg["proxy"] = str(body["proxy"]).strip()
             save_weread_cfg(cfg)
             self._json(200, {"ok": True, "masked": (cfg["apiKey"][:3] + "****" + cfg["apiKey"][-4:]) if len(cfg["apiKey"]) > 7 else bool(cfg["apiKey"])})
+        elif path == "/api/covers/batch":
+            self._cover_batch()
         elif path.startswith("/api/covers/apply/"):
             self._cover_apply(path.rsplit("/", 1)[1])
         elif path.startswith("/api/covers/upload/"):
@@ -1470,6 +1482,81 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain")
 
     # ---------- 封面 ----------
+    def _cover_batch(self):
+        """批量给无封面书籍搜封面并应用（服务端断点续跑）。
+        POST {offset?, limit?, reset?}: 处理 offset..offset+limit 的无封面书；每本搜豆瓣取首个候选→下载→upload。
+        reset=true 清空断点。返回本批结果与累计进度。"""
+        body = self._read_body()
+        offset = int(body.get("offset") or 0)
+        limit = int(body.get("limit") or 50)
+        state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cover-batch-state.json")
+        if body.get("reset") and os.path.isfile(state_file):
+            try:
+                os.remove(state_file)
+            except OSError:
+                pass
+        # 收集全部无封面书
+        data = get_meta()
+        books, _counts = classify_books(data)
+        miss = [b for b in books if not b.get("cover")]
+        total = len(miss)
+        batch = miss[offset:offset + limit]
+        stats = {}
+        for b in batch:
+            try:
+                r = self._cover_one(b)
+            except Exception as e:
+                r = f"err:{type(e).__name__}"
+            stats[r] = stats.get(r, 0) + 1
+        done = offset + len(batch)
+        state = {"done": done, "total": total, "stats": stats, "finished": done >= total}
+        json.dump(state, open(state_file, "w", encoding="utf-8"), ensure_ascii=False)
+        self._json(200, {"ok": True, **state})
+
+    def _cover_one(self, book):
+        """给单本书搜+下载+应用封面。返回状态字符串（ok/skip-pinyin/no-hit/no-pic/dl-fail/bad-img/upload-fail）。"""
+        bid = str(book["id"])
+        q_title, q_author = book.get("title") or "", book.get("author") or ""
+        # 拼音标题 → 从书内嵌元数据取中文兜底
+        if q_title and not re.search(r'[\u4e00-\u9fff]', q_title):
+            try:
+                mt, ma = book_meta(os.path.join(LIB_ROOT, book["path"]), os.path.splitext(book["path"])[1].lower())
+                if re.search(r'[\u4e00-\u9fff]', mt):
+                    q_title, q_author = mt, ma or q_author
+            except Exception:
+                pass
+        res = cover_search(cover_queries(q_title, q_author))
+        cands = res.get("candidates") or []
+        if not cands:
+            return "skip-pinyin" if not re.search(r'[\u4e00-\u9fff]', q_title) else "no-hit"
+        url = cands[0].get("url") or ""
+        if not url:
+            return "no-pic"
+        big = (url.replace("/sqxs/", "/lpic/")
+                  .replace("/view/subject/s/public/", "/view/subject/l/public/")
+                  .replace("/s/public/", "/l/public/"))
+        img = None
+        for u in (big, url):
+            try:
+                img = _http_get(u, referer="https://book.douban.com/")
+                if img and _is_valid_image(img):
+                    break
+            except Exception:
+                continue
+        if not img or not _is_valid_image(img):
+            return "bad-img"
+        full = os.path.join(LIB_ROOT, book["path"])
+        dest = os.path.splitext(full)[0] + ".cover.jpg"
+        with LOCK:
+            open(dest, "wb").write(img)
+            d = get_meta()
+            d["covers"][bid] = dest
+            for bb in d["books"]:
+                if str(bb["id"]) == bid:
+                    bb["cover"] = True
+            save_meta(d)
+        return "ok"
+
     def _cover_search(self, bid):
         data = get_meta()
         book = next((b for b in data["books"] if str(b["id"]) == bid), None)
@@ -1506,16 +1593,19 @@ class Handler(BaseHTTPRequestHandler):
         dest = os.path.splitext(full)[0] + ".cover.jpg"  # 每本书专属，避免同目录共享 cover.jpg 互相覆盖
         try:
             img = None
-            big = url.replace("/view/subject/s/public/", "/view/subject/l/public/")
+            # 小图转大图：豆瓣 sqxs→lpic、s/public→l/public 全套替换（尽量取原始大图）
+            big = (url.replace("/sqxs/", "/lpic/")
+                      .replace("/view/subject/s/public/", "/view/subject/l/public/")
+                      .replace("/s/public/", "/l/public/"))
             for u in (big, url):
                 try:
                     img = _http_get(u, referer="https://book.douban.com/")
-                    if img and len(img) > 1000:
+                    if img and _is_valid_image(img):
                         break
                 except Exception:
                     continue
-            if not img:
-                raise RuntimeError("封面下载失败")
+            if not img or not _is_valid_image(img):
+                raise RuntimeError("封面下载失败或非有效图片")
             with LOCK:
                 open(dest, "wb").write(img)
                 data["covers"][bid] = dest

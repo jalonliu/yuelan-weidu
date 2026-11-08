@@ -924,26 +924,29 @@ async function pickCover(b) {
 }
 
 $('#coverAllBtn').onclick = async () => {
-  if (!confirm('对全部无封面书籍批量搜索豆瓣封面？每本自动采用第一个候选（可逐本重选覆盖）。继续？')) return;
+  if (!confirm('对全部无封面书籍批量搜索豆瓣封面？每本自动采用第一个候选（可逐本重选覆盖）。\n大批量分批续跑，中断后再次点击从断点继续。继续？')) return;
   $('#coverAllBtn').textContent = '⏳ 匹配中…';
-  const noCover = books.filter(b => !b.cover);
-  let ok = 0, fail = 0;
-  for (const b of noCover) {
-    try {
-      const s = await fetch('/api/covers/search/' + b.id);
-      const sd = await s.json();
-      const c = sd.candidates?.[0];
-      if (!c) { fail++; continue; }
-      const a = await fetch('/api/covers/apply/' + b.id, {
+  let offset = 0, totalOk = 0, totalOther = 0, total = 0;
+  try {
+    while (true) {
+      const r = await fetch('/api/covers/batch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: c.url })
+        body: JSON.stringify({ offset, limit: 30 })
       });
-      (await a.json()).ok ? ok++ : fail++;
-    } catch { fail++; }
-    await new Promise(r => setTimeout(r, 300)); // 对豆瓣限速友好
+      const d = await r.json();
+      if (!d.ok) { alert('批量匹配失败: ' + (d.error || '')); break; }
+      total = d.total || 0;
+      totalOk += (d.stats?.ok || 0);
+      totalOther += Object.entries(d.stats || {}).reduce((a, [k, v]) => a + (k === 'ok' ? 0 : v), 0);
+      if (d.finished || !d.total) { offset = d.done; break; }
+      offset = d.done;
+      $('#coverAllBtn').textContent = `⏳ 已处理 ${offset}/${d.total}…`;
+    }
+  } catch (e) {
+    alert('批量匹配异常: ' + e);
   }
   $('#coverAllBtn').textContent = '🖼 无封面批量匹配';
-  alert(`批量匹配完成：成功 ${ok}，失败 ${fail}（失败可单独重试）`);
+  alert(`批量匹配完成：成功 ${totalOk}，失败/跳过 ${totalOther}（失败可单独重试）`);
   loadShelf();
 };
 

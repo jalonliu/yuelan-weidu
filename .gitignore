@@ -18,3 +18,6 @@ listen.json
 
 # 服务错误日志
 server.log.err
+
+# 封面批量断点状态
+.cover-batch-state.json
