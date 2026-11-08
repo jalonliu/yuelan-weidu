@@ -221,9 +221,12 @@ def build_index():
             cover_path = ""
             if os.path.normpath(full).lower() in calibre_meta:
                 title, author, cover_path = calibre_meta[os.path.normpath(full).lower()]
-            # 在线匹配下载过的封面: 书旁 cover.jpg
+            # 在线匹配下载过的封面: <文件名>.cover.jpg（每本书专属）或书旁 cover.jpg（目录级，旧数据兼容）
             local_cover = os.path.join(dirpath, "cover.jpg")
-            if not cover_path and os.path.isfile(local_cover):
+            own_cover = os.path.splitext(full)[0] + ".cover.jpg"
+            if not cover_path and os.path.isfile(own_cover):
+                cover_path = own_cover
+            elif not cover_path and os.path.isfile(local_cover):
                 cover_path = local_cover
             books.append({
                 "id": len(books),
@@ -1119,7 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"ok": False, "error": "book not found"})
             return
         full = os.path.join(LIB_ROOT, book["path"])
-        dest = os.path.join(os.path.dirname(full), "cover.jpg")
+        dest = os.path.splitext(full)[0] + ".cover.jpg"  # 每本书专属，避免同目录共享 cover.jpg 互相覆盖
         try:
             img = None
             big = url.replace("/view/subject/s/public/", "/view/subject/l/public/")
@@ -1163,7 +1166,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"ok": False, "error": "图片内容过小或为空"})
             return
         full = os.path.join(LIB_ROOT, book["path"])
-        dest = os.path.join(os.path.dirname(full), "cover.jpg")
+        dest = os.path.splitext(full)[0] + ".cover.jpg"  # 每本书专属，避免同目录共享 cover.jpg 互相覆盖
         with LOCK:
             open(dest, "wb").write(raw)
             data["covers"][bid] = dest
