@@ -37,7 +37,7 @@ BOOK_EXT = {".epub", ".mobi", ".azw3", ".fb2"}
 INDEX_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "books.json")
 TRASH_DIR = os.path.join(LIB_ROOT, "_trash")
 TRASH_META = os.path.join(TRASH_DIR, ".trash-meta.json")
-SKIP_DIRS = {".calibre", ".Trash", "_trash"}
+SKIP_DIRS = {".calibre", ".Trash", "_trash", "Calibre"}
 # 微信读书 Agent Gateway（参考 zhaohongxuan/dsh-weread，仅 API-Key 路径）
 WEREAD_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weread.json")
 WEREAD_URL = "https://i.weread.qq.com/api/agent/gateway"
@@ -122,7 +122,7 @@ import zipfile as _zip
 import struct as _struct
 
 _RENAME_BAD = r'[\\/:*?"<>|]'
-_RENAME_PYN = re.compile(r'^[A-Za-z0-9\s\-_.\(\)\[\]]+\.(epub|mobi|pdf|azw3?|txt)$')
+_RENAME_PYN = re.compile(r'^[\x20-\x7e]+\.(epub|mobi|pdf|azw3?|txt)$')
 
 def book_meta(fp, ext):
     """从书文件内嵌元数据提取 (标题, 作者)：epub OPF > mobi EXTH > pdf Info.Title。"""
