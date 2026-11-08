@@ -929,8 +929,40 @@ def today_brief():
     t0 = int(time.mktime(time.strptime(today, "%Y-%m-%d")))
     t1 = t0 + 86400
     tr = track_load().get(today, {})
-    today_books = [{"title": v.get("title") or k, "seconds": v.get("seconds", 0),
-                    "percent": v.get("percent", 0)} for k, v in tr.items()]
+    # 把 track 的 key（local-<id> / listen-...）映射回真实书籍 id，供前端点击直接打开到阅读位置。
+    # 注意：索引重建后 id 会漂移，track 里存的 local-<id> 可能与当前书籍对不上——
+    # 必须用 title 二次校验（归一化后比对），匹配不上就按 title 在全库重新找唯一一本，仍找不到则不给链接。
+    def _norm(s):
+        return re.sub(r"[\s\-_·（）()【】\[\]]", "", (s or "")).lower()
+    by_id = {}
+    by_title = {}
+    try:
+        for bb in get_meta().get("books", []):
+            by_id[str(bb.get("id"))] = bb
+            by_title.setdefault(_norm(bb.get("title")), []).append(bb)
+    except Exception:
+        by_id, by_title = {}, {}
+    today_books = []
+    for k, v in tr.items():
+        bid = None
+        rec_title = v.get("title") or k
+        if k.startswith("local-"):
+            cand = k[len("local-"):]
+            bk = by_id.get(cand)
+            # id 命中且书名一致才认；不一致则按书名重查（唯一才认），避免 id 漂移打开错书
+            if bk and _norm(bk.get("title")) == _norm(rec_title):
+                bid = cand
+            else:
+                same = by_title.get(_norm(rec_title)) or []
+                if len(same) == 1:
+                    bid = str(same[0].get("id"))
+        item = {"title": rec_title, "seconds": v.get("seconds", 0),
+                "percent": v.get("percent", 0), "bookId": bid,
+                "path": (by_id.get(bid, {}).get("path") if bid else None),
+                "shelf": (by_id.get(bid, {}).get("shelf") if bid else None),
+                "format": (by_id.get(bid, {}).get("format") if bid else None)}
+        today_books.append(item)
+    today_books.sort(key=lambda x: -x["seconds"])
     local_sec = sum(b["seconds"] for b in today_books)
     wr_sec = 0
     try:
@@ -1085,8 +1117,12 @@ class Handler(BaseHTTPRequestHandler):
             books, counts = classify_books(data)
             order = {"main": 0, "adult": 1, "misc": 2}
             rows = [b for b in books if want == "all" or b["shelf"] == want]
-            rows.sort(key=lambda b: (-b.get("mtime", 0), order.get(b["shelf"], 9), str(b["title"])))
             opened = opened_load()
+            # 最近打开的书（opened.json 记录的打开时间）冒到最前——像 Kindle 的"正在读"置顶；
+            # 其余仍按修改时间倒序。opened 里没有的书 opened_ts=0，不干扰组内原有相对顺序。
+            def _open_ts(b):
+                return opened.get((b.get("path") or "").lower(), 0) or 0
+            rows.sort(key=lambda b: (-_open_ts(b), -b.get("mtime", 0), order.get(b["shelf"], 9), str(b["title"])))
             for b in rows:
                 b["opened"] = (b.get("path") or "").lower() in opened
             self._json(200, {"count": len(rows), "total": data["count"], "shelves": counts,

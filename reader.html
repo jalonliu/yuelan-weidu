@@ -95,6 +95,8 @@ body.manage .bk { outline:1px dashed var(--border); }
   .card .big { font-size:26px; font-weight:700; }
   .card .row { display:flex; justify-content:space-between; font-size:13px; padding:5px 0; border-bottom:1px dashed var(--border); }
   .card .row:last-child { border-bottom:none; }
+  .card .row .rdopen { color:var(--accent); cursor:pointer; text-decoration:none; }
+  .card .row .rdopen:hover { text-decoration:underline; }
   .quote { font-size:14px; line-height:1.8; padding:10px 12px; border-left:3px solid var(--accent); background:var(--card); border-radius:8px; margin:8px 0; }
   .quote .src { color:var(--muted); font-size:12px; margin-top:6px; }
   .cal { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; max-width:420px; }
@@ -1055,7 +1057,9 @@ async function loadToday() {
       </div>
       <div class="card"><h4>📚 今天读过的电子书</h4>${
         d.todayBooks.length ? d.todayBooks.map(b =>
-          `<div class="row"><span>${esc(b.title)}</span><span style="color:var(--muted)">${fmtDur(b.seconds)} · ${b.percent||0}%</span></div>`).join('')
+          `<div class="row">${
+            b.bookId ? `<a class="rdopen" data-bid="${esc(String(b.bookId))}" href="javascript:void(0)" title="打开到上次阅读位置">${esc(b.title)}</a>` : `<span>${esc(b.title)}</span>`
+          }<span style="color:var(--muted)">${fmtDur(b.seconds)} · ${b.percent||0}%</span></div>`).join('')
         : '<div class="wrmsg">今天还没读，去翻几页？</div>'}</div>
       <div class="card"><h4>✍ 今日划线与想法</h4>${
         d.todayNotes.length ? d.todayNotes.map(n =>
@@ -1063,6 +1067,22 @@ async function loadToday() {
         : '<div class="wrmsg">今天还没有新的划线与想法。</div>'}</div>
       ${rs ? `<div class="card"><h4>${d.resurfaceMode==='onthisday' ? '🕰 那年今日' : '🔁 旧句重逢'}</h4>
         <div class="quote">${esc(rs.text)}<div class="src">${esc(rs.title)} · ${rs.time ? new Date(rs.time*1000).toLocaleDateString() : ''}</div></div></div>` : ''}`;
+    // 今日读过的书：点书名直接打开到该书的阅读位置（epub 用 localStorage CFI 恢复，pdf/txt 从头）
+    c.querySelectorAll('.rdopen').forEach(a => {
+      a.onclick = async () => {
+        const bid = a.dataset.bid;
+        let book = (books || []).find(x => String(x.id) === String(bid));
+        if (!book) {
+          // 不在当前书架里：按 id 拉全库再找
+          try {
+            const rr = await fetch('/api/books?shelf=all'); const dd = await rr.json();
+            book = (dd.books || []).find(x => String(x.id) === String(bid));
+          } catch { /* ignore */ }
+        }
+        if (book) openBook(book);
+        else alert('这本书已不在书库中（可能已删除或索引已变）。');
+      };
+    });
   } catch (e) { $('#tdBody').textContent = '加载失败：' + esc(String(e)); }
 }
 
