@@ -82,6 +82,41 @@ def save_shelf_override(book_path, shelf):
     json.dump(ov, open(SHELF_FILE, "w", encoding="utf-8"), ensure_ascii=False)
     return ov
 
+def move_book_file(rel, shelf):
+    """真移动书籍文件到对应书架目录（书库/杂书架/18+），专属封面与 opened.json 路径键同步改写。
+    返回新相对路径；文件不存在或 shelf 非法返回 None。"""
+    d = {"main": "书库", "misc": "杂书架", "adult": "18+"}.get(shelf)
+    if not d:
+        return None
+    src = os.path.join(LIB_ROOT, rel)
+    if not os.path.isfile(src):
+        return None
+    os.makedirs(os.path.join(LIB_ROOT, d), exist_ok=True)
+    base = os.path.basename(rel)
+    dest = os.path.join(LIB_ROOT, d, base)
+    n = 1
+    while os.path.isfile(dest) and os.path.normcase(dest) != os.path.normcase(src):
+        root, ext = os.path.splitext(base)
+        dest = os.path.join(LIB_ROOT, d, f"{root} ({n}){ext}")
+        n += 1
+    with LOCK:
+        shutil.move(src, dest)
+        old_cov = os.path.splitext(src)[0] + ".cover.jpg"
+        if os.path.isfile(old_cov):
+            shutil.move(old_cov, os.path.splitext(dest)[0] + ".cover.jpg")
+        try:
+            op = json.load(open(OPENED_FILE, encoding="utf-8"))
+        except Exception:
+            op = {}
+        rl, nl = rel.lower(), os.path.relpath(dest, LIB_ROOT).lower()
+        if rl in op:
+            op[nl] = op.pop(rl)
+            json.dump(op, open(OPENED_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+        ov = shelf_overrides()
+        ov.pop(rl, None)
+        json.dump(ov, open(SHELF_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    return os.path.relpath(dest, LIB_ROOT)
+
 def classify_books(data):
     """给每本书标 shelf：adult=关键词命中或手动覆盖；main=封面+作者全且重名最优副本；其余 misc。"""
     books = data["books"]
@@ -116,10 +151,15 @@ def classify_books(data):
             for r in rows:
                 r["_dup"] = False
     counts = {"main": 0, "misc": 0, "adult": 0}
+    SHELF_DIRS = {"书库": "main", "杂书架": "misc", "18+": "adult"}
     for b in books:
         s = ov.get((b.get("path") or "").lower())
         if s not in ("main", "misc", "adult"):
-            if b["_kw"]:
+            # 目录即书架：位于 书库/杂书架/18+ 顶层目录的书按目录归类
+            top = (b.get("path") or "").replace("/", "\\").split("\\")[0]
+            if top in SHELF_DIRS:
+                s = SHELF_DIRS[top]
+            elif b["_kw"]:
                 s = "adult"
             elif b["_dup"] or not b.get("cover") or not (b.get("author") or "").strip():
                 s = "misc"
@@ -1033,8 +1073,12 @@ class Handler(BaseHTTPRequestHandler):
             if not bpath:
                 self._json(400, {"ok": False, "error": "id/path required"})
                 return
-            ov = save_shelf_override(bpath, shelf)
-            self._json(200, {"ok": True, "overrides": len(ov)})
+            if shelf in ("main", "misc", "adult"):
+                newp = move_book_file(bpath, shelf)
+                self._json(200, {"ok": True, "moved": bool(newp), "path": newp})
+            else:  # auto：只清覆盖
+                ov = save_shelf_override(bpath, shelf)
+                self._json(200, {"ok": True, "overrides": len(ov)})
         elif path == "/api/shelf/batch":
             # 管理模式批量移动：{paths: [...], shelf}
             body = self._read_body()
@@ -1043,10 +1087,14 @@ class Handler(BaseHTTPRequestHandler):
             if shelf not in ("main", "misc", "adult", "auto") or not paths:
                 self._json(400, {"ok": False, "error": "paths/shelf required"})
                 return
-            ov = shelf_overrides()
-            for p in paths:
-                ov = save_shelf_override(p, shelf)
-            self._json(200, {"ok": True, "moved": len(paths), "overrides": len(ov)})
+            if shelf in ("main", "misc", "adult"):
+                moved = sum(1 for p in paths if move_book_file(str(p), shelf))
+                self._json(200, {"ok": True, "moved": moved, "skipped": len(paths) - moved})
+            else:  # auto：只清覆盖
+                ov = shelf_overrides()
+                for p in paths:
+                    ov = save_shelf_override(p, shelf)
+                self._json(200, {"ok": True, "moved": 0, "overrides": len(ov)})
         elif path == "/api/weread/refresh":
             # 清空每日缓存，强制重新拉取
             for f in os.listdir(WR_CACHE) if os.path.isdir(WR_CACHE) else []:
