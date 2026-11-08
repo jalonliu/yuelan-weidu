@@ -980,7 +980,15 @@ def track_summary():
 
 def cover_queries(title, author):
     """豆瓣搜索词清洗：去书名号/括号注记（精校版全本等）/噪声词，超长截断。"""
-    t = re.sub(r"[《》「」〖〗\[\]]", "", title or "")
+    title = title or ""
+    author = author or ""
+    # 文件名格式「书名 - 作者」会把作者也带进 title：先拆出来，避免「书名 - 作者」组合词被豆瓣直接返回空
+    m = re.split(r"\s+-\s+", title, maxsplit=1)
+    if len(m) == 2:
+        title, title_author = m[0].strip(), m[1].strip()
+        if not author:
+            author = title_author
+    t = re.sub(r"[《》「」〖〗\[\]]", "", title)
     t = re.split(r"[（(【\[]", t)[0]
     t = re.sub(r"(精校|精排|全本|全集|校对|典藏|扫描|高清|文字|完整|插图|修订|珍藏|双语|注释|注音|软精装|套装|珍藏版?|纪念版?|新版?|原版?|第?\s*\d+\s*版?|上|下|Ⅰ|Ⅱ|Ⅲ).{0,8}$", "", t)
     t = t.strip(" -_·，,。;；:：!！?？")
